@@ -1,5 +1,3 @@
-# 从Prompt Engineering到Loop Engineering
-
 过去几年，业界对大模型的关注点经历了四次转移。
 
 一开始大家在聊的是 Prompt Engineering，提示词工程。那个时候所有人都相信一件事：模型不是不会，只是你没把话讲明白，只要提示词写得够好，啥都能搞定。
@@ -21,7 +19,7 @@
 - **Harness Engineering** 解决的是：**怎么让模型在真实执行里「持续做对」一连串的事**
 - **Loop Engineering**解决的是：**怎么让模型在无人干预下「自我进化」**
 
-# 第一阶段：Prompt Engineering，先让模型「听懂」你
+# 1 第一阶段：Prompt Engineering，先让模型「听懂」你
 
 要讲清楚 Prompt Engineering，得先聊一个更基础的问题：大模型到底在干啥？
 
@@ -76,7 +74,7 @@
 
 于是第二阶段就来了：Context Engineering。
 
-# 第二阶段：Context Engineering，让模型「知道」该用什么信息
+# 2 第二阶段：Context Engineering，让模型「知道」该用什么信息
 
 为什么 Context Engineering 会突然火起来？因为大家做的产品形态变了。
 
@@ -133,7 +131,7 @@
 
 Context Engineering 在 Prompt Engineering 的基础上又往前走了一大步：从「把任务讲清楚」升级到了「把信息送对」。
 
-# 第三阶段：Harness Engineering，让模型「做对」一连串的事
+# 3 第三阶段：Harness Engineering，让模型「做对」一连串的事
 
 后来大家又发现了一个更麻烦的问题。
 
@@ -180,7 +178,7 @@ Harness 这个英文词，直译过来叫「马具」，或者说「缰绳」。
 
 这一整套东西，就是 Harness。它的重点已经不是「把话讲清楚」「把资料给齐」了，而是「有没有一整套机制能持续观测、持续纠正、最终验收」。
 
-# 第四阶段：Loop Engeering，让模型「自我进化」
+# 4 第四阶段：Loop Engeering，让模型「自我进化」
 
 演进到了Harness阶段，下一个碰到的瓶颈是谁呢？
 
