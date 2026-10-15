@@ -2,7 +2,9 @@
 
 ## 1.1 安装
 
-Kafka 依赖于 ZooKeeper，如果以单机模式调试 Kafka，需要确保本机已经安装了 ZooKeeper，并处于启动状态。
+在 Kafka 3.3 之前的版本中，Kafka 依赖 ZooKeeper 进行元数据管理。若以传统单机模式调试 Kafka，需要确保本机已经安装了 ZooKeeper，并处于启动状态；若使用 KRaft 模式，则无需部署 ZooKeeper。
+
+随着 Kafka 架构的不断演进，从 2.8 版本开始，社区引入了基于 Raft 协议的 KRaft（Kafka Raft metadata mode）模式，旨在彻底移除对外部 ZooKeeper 的依赖。在 KRaft 模式下，Kafka 集群内部选举出的 Controller 节点负责处理所有元数据的管理与同步工作。这一架构变革不仅简化了 Kafka 的部署和运维成本，避免了维护两套分布式系统（Kafka 和 ZooKeeper）带来的复杂性，还大幅提升了集群在分区数量扩展时的性能表现。KRaft 模式已在 Kafka 3.3 版本中达到生产可用级别；随着 Kafka 4.0 正式移除 ZooKeeper 模式，KRaft 已成为唯一的元数据管理模式。因此，在实际的生产环境搭建和新项目选型中，强烈建议优先考虑采用无 ZooKeeper 的 KRaft 架构。
 
 Kafka 安装很简单，不再赘述。
 
@@ -20,12 +22,14 @@ kafka-console-producer.sh           kafka-topics.sh
 kafka-consumer-groups.sh            kafka-verifiable-consumer.sh
 kafka-consumer-perf-test.sh         kafka-verifiable-producer.sh
 kafka-delegation-tokens.sh          trogdor.sh
-kafka-delete-records.sh							kafka-dump-log.sh
-zookeeper-security-migration.sh			zookeeper-server-start.sh
+kafka-delete-records.sh             kafka-dump-log.sh
+zookeeper-security-migration.sh     zookeeper-server-start.sh
 kafka-leader-election.sh            zookeeper-server-stop.sh
 kafka-log-dirs.sh                   kafka-preferred-replica-election.sh
 kafka-mirror-maker.sh               zookeeper-shell.sh
 ```
+
+其中，`kafka-preferred-replica-election.sh` 自 Kafka 2.4.0 起被标记为废弃，其功能已合并至 `kafka-leader-election.sh`，后续版本中已被移除。
 
 比如，`kafka-server-start.sh` 用于启动 Kafka，`kafka-server-stop.sh` 用于停止 Kafka 等，大多可以通过脚本的名字猜到其作用。
 
@@ -36,7 +40,7 @@ kafka-mirror-maker.sh               zookeeper-shell.sh
 第二个参数指定的是 broker 的配置文件，主要关注下面几个参数：
 
 ```properties
-# broker的编号，如果集群中有多个 broker，则每个 broker 的编号需要设置的不同
+# broker 的编号，集群内必须唯一
 broker.id=0
 
 # broker 对外提供的服务入口地址
@@ -57,17 +61,17 @@ $ jps -l
 然后通过 `kafka-topics.sh` 脚本创建一个分区数为 3，副本为 1 的主题：
 
 ```shell
-./kafka-topics.sh --zookeeper localhost:2181/kafka --create --topic first-topic --replication-factor 1 --partitions 3
+./kafka-topics.sh --bootstrap-server localhost:9092 --create --topic first-topic --replication-factor 1 --partitions 3
 
 Created topic "first-topic".
 ```
 
-其中 `--zookeeper` 指定了 Kafka 所连接的 ZooKeeper 服务地址，`--topic` 指定了所要创建主题的名称，`--replication-factor` 指定了副本因子，`--partitions` 指定了分区个数，`--create` 是创建主题的动作指令。
+其中 `--bootstrap-server` 指定了 Kafka 集群的 Broker 地址，`--topic` 指定了所要创建主题的名称，`--replication-factor` 指定了副本因子，`--partitions` 指定了分区个数，`--create` 是创建主题的动作指令。
 
 还可以通过 `--describe` 展示主题的更多具体信息，示例如下：
 
 ```shell
-./kafka-topics.sh --zookeeper localhost:2181/kafka --describe --topic first-topic
+./kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic first-topic
 
 Topic: first-topic	PartitionCount: 3	ReplicationFactor: 1	Configs:
 	Topic: first-topic	Partition: 0	Leader: 0	Replicas: 0	Isr: 0
@@ -86,31 +90,31 @@ Topic: first-topic	PartitionCount: 3	ReplicationFactor: 1	Configs:
 再打开一个 shell 终端，然后使用 `kafka-console-producer.sh` 脚本发送一条消息至主题 first-topic：
 
 ```shell
-./kafka-console-producer.sh --broker-list localhost:9092 --topic first-topic
->hello world !
+./kafka-console-producer.sh --bootstrap-server localhost:9092 --topic first-topic
+>hello world!
 >
 ```
 
-其中 `--broker-list` 指定了连接的 Kafka 集群地址，`--topic` 指定了发送消息时的主题。示例中的第二行是通过人工键入的方式输入的，按下回车键后会跳到第三行，即“>”字符处。此时原先执行 `kafka-console-consumer.sh` 脚本的 shell 终端中出现了刚刚输入的消息：
+其中 `--bootstrap-server` 指定了连接的 Kafka 集群地址，`--topic` 指定了发送消息时的主题（旧版本中使用 `--broker-list` 参数，新版本已统一为 `--bootstrap-server`）。示例中的第二行是通过人工键入的方式输入的，按下回车键后会跳到第三行，即“>”字符处。此时原先执行 `kafka-console-consumer.sh` 脚本的 shell 终端中出现了刚刚输入的消息：
 
 ```shell
 ./kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic first-topic
-hello world !
+hello world!
 ```
 
 ## 1.2 配置参数
 
 - zookeeper.connect
 
-该参数指明 broker 要连接的 ZooKeeper 集群的服务地址（包含端口号），**没有默认值，且此参数为必填项**。如果 ZooKeeper 集群中有多个节点，则可以用逗号将每个节点隔开，类似于 `localhost1:2181,localhost2:2181,localhost3:2181` 这种格式。最佳的实践方式是再加一个 chroot 路径，类似于 `localhost1:2181,localhost2:2181,localhost3:2181/kafka`，这样既可以明确指明该 chroot 路径下的节点是为 Kafka 所用的，也可以实现多个 Kafka 集群复用一套 ZooKeeper 集群，可以节省更多的硬件资源。如果不指定 chroot，那么默认使用 ZooKeeper 的根路径。
+该参数指明 broker 要连接的 ZooKeeper 集群的服务地址（包含端口号），**没有默认值，且此参数为必填项**（此说明仅针对传统 ZooKeeper 模式；KRaft 模式下无需配置此参数，Controller 集群地址由 `controller.quorum.voters` 等参数指定）。如果 ZooKeeper 集群中有多个节点，则可以用逗号将每个节点隔开，类似于 `localhost1:2181,localhost2:2181,localhost3:2181` 这种格式。最佳的实践方式是再加一个 chroot 路径，类似于 `localhost1:2181,localhost2:2181,localhost3:2181/kafka`，这样既可以明确指明该 chroot 路径下的节点是为 Kafka 所用的，也可以实现多个 Kafka 集群复用一套 ZooKeeper 集群，可以节省更多的硬件资源。如果不指定 chroot，那么默认使用 ZooKeeper 的根路径。
 
 - listeners
 
-该参数指明 broker 监听客户端连接的地址列表，即为客户端要连接 broker 的入口地址列表，配置格式为 `protocol1://hostname1:port1,protocol2://hostname2:port2`，其中 protocol 代表协议类型，Kafka 当前支持的协议类型有 **PLAINTEXT**、**SSL**、**SASL_SSL** 等，如果未开启安全认证，则使用简单的 PLAINTEXT 即可。hostname 代表主机名，port 代表服务端口，此参数的默认值为 null。比如此参数配置为 `PLAINTEXT://198.162.0.2:9092`，如果有多个地址，则中间以逗号隔开。与此参数关联的还有 `advertised.listeners`，作用和 listeners 类似，默认值也为 null。不过 `advertised.listeners` 主要用于 IaaS（Infrastructure as a Service）环境，比如公有云上的机器通常配备有多块网卡，即包含私网网卡和公网网卡，对于这种情况而言，可以设置 advertised.listeners 参数绑定公网 IP 供外部客户端使用，而配置 listeners 参数来绑定私网 IP 地址供 broker 间通信使用。
+该参数指明 broker 监听客户端连接的地址列表，即为客户端要连接 broker 的入口地址列表，配置格式为 `protocol1://hostname1:port1,protocol2://hostname2:port2`，其中 protocol 代表协议类型，Kafka 当前支持的协议类型有 **PLAINTEXT**、**SSL**、**SASL_SSL** 等，如果未开启安全认证，则使用简单的 PLAINTEXT 即可。hostname 代表主机名，port 代表服务端口，此参数的默认值为 null。比如此参数配置为 `PLAINTEXT://192.168.0.2:9092`，如果有多个地址，则中间以逗号隔开。与此参数关联的还有 `advertised.listeners`，作用和 listeners 类似，默认值也为 null。不过 `advertised.listeners` 主要用于 IaaS（Infrastructure as a Service）环境，比如公有云上的机器通常配备有多块网卡，即包含私网网卡和公网网卡，对于这种情况而言，可以设置 advertised.listeners 参数绑定公网 IP 供外部客户端使用，而配置 listeners 参数来绑定私网 IP 地址供 broker 间通信使用。
 
 - broker.id
 
-broker 在启动之前必须设定的参数之一，在 Kafka 集群中，每个 broker 都有唯一的 id 值用来区分彼此。broker 在启动时会在 ZooKeeper 中的 /brokers/ids 路径下创建一个以当前 brokerId 为名称的虚节点，broker 的健康状态检查就依赖于此虚节点。当 broker 下线时，该虚节点会自动删除，其他 broker 节点或客户端通过判断 /brokers/ids 路径下是否有此 broker 的 brokerId 节点来确定该 broker 的健康状态。
+broker 在启动之前必须设定的参数之一，在 Kafka 集群中，每个 broker 都有唯一的 id 值用来区分彼此。在传统 ZooKeeper 模式下，broker 启动时会在 ZooKeeper 的 /brokers/ids 路径下创建一个以当前 brokerId 为名称的临时节点（Ephemeral Node），broker 的健康状态检查就依赖于此临时节点；当 broker 下线时，该临时节点会自动删除，其他 broker 节点或客户端通过判断 /brokers/ids 路径下是否存在对应 brokerId 的节点来确定该 broker 的健康状态。而在较新的 KRaft 模式下，broker 的 ID 及元数据信息则由内置的 Raft 协议控制器（Controller Quorum）进行管理，不再依赖 ZooKeeper。
 
 - log.dir & log.dirs
 
@@ -184,11 +188,13 @@ Kafka 中大量使用了页缓存，这是 Kafka 实现高吞吐的重要因素�
 
 ![](imgs/2.png)
 
-零拷贝技术通过 **DMA**（Direct Memory Access）技术将文件内容复制到内核模式下的 Read Buffer 中。不过没有数据被复制到 Socket Buffer，相反只有包含数据的位置和长度的信息的文件描述符被加到 Socket Buffer 中。DMA 引擎直接将数据从内核模式中传递到网卡设备。这里数据只经历了 2 次复制就从磁盘中传送出去了，并且上下文切换也变成了 2 次。零拷贝是针对内核模式而言的，数据在内核模式下实现了零拷贝。
+零拷贝技术通过 **DMA**（Direct Memory Access）技术将文件内容复制到内核模式下的 Read Buffer 中。不过没有数据被复制到 Socket Buffer，相反只有包含数据的位置和长度的信息的文件描述符被加到 Socket Buffer 中。DMA 引擎直接将数据从内核模式中传递到网卡设备。这里数据只经历了 2 次复制就从磁盘中传送出去了，并且上下文切换也变成了 2 次。零拷贝减少了数据在内核态与用户态之间的拷贝次数。
+
+除了底层操作系统级别的零拷贝技术，Kafka 在数据流转链路上还深度应用了端到端的批处理与压缩机制来进一步压榨网络 I/O 的性能极限。在现代版本的 Kafka 中，Producer 端支持将多条消息在内存中打包成一个 RecordBatch，并结合 LZ4、Snappy、Zstandard 等高效压缩算法进行压缩后再通过网络发送。Broker 接收到这些压缩批次后，可以直接以压缩形态追加写入磁盘日志文件，甚至在 Consumer 拉取数据时也保持压缩状态传输，直到最终在 Consumer 端才被解压。这种设计使得网络带宽的利用率达到了极致，配合零拷贝技术，让 Kafka 能够在有限的硬件资源下支撑起每秒百万级甚至千万级的消息吞吐量。
 
 # 3 时间轮算法
 
-Kafka 中存在大量的延时操作，比如延时生产、延时拉取和延时删除等。Kafka 并没有使用 JDK 自带的 Timer 或 DelayQueue 来实现延时的功能，而是基于**时间轮**的概念自定义实现了一个用于延时功能的定时器。JDK 中 Timer 和 DelayQueue 的底层都是依靠堆这种数据结构来实现的，插入和删除操作的平均时间复杂度为 O(nlogn)，不能满足 Kafka 的高性能要求，而基于时间轮可以将插入和删除操作的时间复杂度都降为 O(1)。时间轮的应用并非 Kafka 独有，其应用场景还有很多，在 Netty、Akka、Quartz、ZooKeeper 等组件中都存在时间轮的踪影。
+Kafka 中存在大量的延时操作，比如延时生产、延时拉取和延时删除等。Kafka 并没有使用 JDK 自带的 Timer 或 DelayQueue 来实现延时的功能，而是基于**时间轮**的概念自定义实现了一个用于延时功能的定时器。JDK 中 Timer 和 DelayQueue 的底层都是依靠堆这种数据结构来实现的，插入和删除操作的平均时间复杂度为 O(log n)，不能满足 Kafka 的高性能要求，而基于时间轮可以将插入和删除操作的时间复杂度都降为 O(1)。时间轮的应用并非 Kafka 独有，其应用场景还有很多，在 Netty、Akka、Quartz、ZooKeeper 等组件中都存在时间轮的踪影。
 
 ![](imgs/3.png)
 

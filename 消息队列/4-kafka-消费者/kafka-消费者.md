@@ -2,7 +2,7 @@
 
 消费者（Consumer）负责订阅 Kafka 中的主题（Topic），并且从订阅的主题上拉取消息。与其他一些消息中间件不同的是：在 Kafka 的消费理念中还有一层**消费组**（Consumer Group）的概念，每个消费者都有一个对应的消费组。当消息发布到主题后，只会被投递给订阅它的每个消费组中的一个消费者，不同消费组之间互不影响。
 
-按照 Kafka 默认的规则，每一个消费者会被分配到 1 个分区，每个消费者只能消费所分配到的分区中的消息。换言之，**每一个分区只能被一个消费组中的一个消费者所消费**。消费者与消费组这种模型可以让整体的消费能力具备横向伸缩性，我们可以增加（或减少）消费者的个数来提高（或降低）整体的消费能力。对于分区数固定的情况，一味地增加消费者并不会让消费能力一直得到提升，如果消费者过多，出现了消费者的个数大于分区个数的情况，就会有消费者分配不到任何分区。
+在消费组内部，按照 Kafka 默认的规则，每一个消费者会被分配到 1 个分区，每个消费者只能消费所分配到的分区中的消息，也就是说**每一个分区只能被一个消费组中的一个消费者所消费**。消费者与消费组这种模型可以让整体的消费能力具备横向伸缩性，我们可以增加（或减少）消费者的个数来提高（或降低）整体的消费能力。不过对于分区数固定的情况，盲目增加消费者数量并不能持续提升消费能力，如果消费者过多，出现了消费者的个数大于分区个数的情况，就会有消费者分配不到任何分区。
 
 对于消息中间件而言，一般有两种消息投递模式：
 
@@ -18,19 +18,21 @@
 
 消费者并非逻辑上的概念，它是实际的应用实例，它可以是一个线程，也可以是一个进程。同一个消费组内的消费者既可以部署在同一台机器上，也可以部署在不同的机器上。
 
+随着流处理场景的日益复杂，传统的消费者组模型要求开发者必须自行管理 Offset 提交与 Exactly-Once 语义，这在构建轻量级工作队列（Work Queue）时显得过于沉重。为此，Kafka 引入了全新的共享消费组（Share Groups）特性（基于 KIP-932，自 Kafka 4.0 起以早期体验形式引入，后续版本逐步完善）。在 Share Group 模式下，Kafka Broker 接管了消息确认（Ack）与 Offset 追踪的职责。多个消费者共同组成一个共享池，Broker 负责将消息分发给池中空闲的消费者，并在收到显式 Ack 或超时后才推进消费进度。这种机制使得 Kafka 能够原生支持类似 RabbitMQ 等传统消息队列的“竞争消费者”模式，极大降低了业务层实现可靠任务分发的代码复杂度。
+
 # 2 位移提交
 
 对于 Kafka 中的分区而言，它的每条消息都有唯一的 offset，用来表示消息在分区中对应的位置。对于消费者而言，它也有一个 offset 的概念，消费者使用 offset 来表示消费到分区中某个消息所在的位置。
 
 在每次调用 poll() 方法时，它返回的是还没有被消费过的消息集，要做到这一点，就需要记录上一次消费时的消费位移。并且这个消费位移必须做持久化保存，而不是单单保存在内存中，否则消费者重启之后就无法知晓之前的消费位移。再考虑一种情况，当有新的消费者加入时，那么必然会有**再均衡**的动作，对于同一分区而言，它可能在再均衡动作之后分配给新的消费者，如果不持久化保存消费位移，那么这个新的消费者也无法知晓之前的消费位移。
 
-消费位移存储在 Kafka 内部的主题 `_consumer_offsets` 中。这里把将消费位移存储起来（持久化）的动作称为“**提交**”，消费者在消费完消息之后需要执行消费位移的提交。
+消费位移存储在 Kafka 内部的主题 `__consumer_offsets` 中，该主题默认包含 50 个分区，副本因子由 Broker 端参数 `offsets.topic.replication.factor` 决定，默认值为 3。这里把将消费位移存储起来（持久化）的动作称为“**提交**”，消费者在消费完消息之后需要执行消费位移的提交。
 
-对于位移提交的具体时机的把握很有讲究，有可能会造成重复消费和消息丢失的现象。
+位移提交时机的选择至关重要，把握不好就有可能造成重复消费和消息丢失的现象。
 
 ![](imgs/1.png)
 
-上图中，当前一次 poll() 操作所拉取的消息集为 [x+2, x+7]，x+2 代表上一次提交的消费位移，说明已经完成了 x+1 之前（包括 x+1 在内）的所有消息的消费，x+5 表示当前正在处理的位置。如果拉取到消息之后就进行了位移提交，即提交了 x+8，那么当前消费 x+5 的时候遇到了异常，在故障恢复之后，我们重新拉取的消息是从 x+8 开始的。也就是说，x+5 至 x+7 之间的消息并未能被消费，如此便发生了消息丢失的现象。
+上图中，当前一次 poll() 操作所拉取的消息集为 [x+2, x+7]。x+2 代表上一次提交的消费位移，即下一次拉取的起始位置，说明 x+2 之前的所有消息（包括 x+1 在内）都已完成消费，x+5 表示当前正在处理的位置。如果拉取到消息之后就进行了位移提交，即提交了 x+8，那么当前消费 x+5 的时候遇到了异常，在故障恢复之后，我们重新拉取的消息是从 x+8 开始的。也就是说，x+5 至 x+7 之间的消息并未能被消费，如此便发生了消息丢失的现象。
 
 再考虑另外一种情形，位移提交的动作是在消费完所有拉取到的消息之后才执行的，那么当消费 x+5 的时候遇到了异常，在故障恢复之后，我们重新拉取的消息是从 x+2 开始的。也就是说，x+2 至 x+4 之间的消息又重新消费了一遍，故而又发生了重复消费的现象。
 
@@ -44,19 +46,19 @@
 
 上图中，拉取线程 A 不断地拉取消息并存入本地缓存，比如在 BlockingQueue 中，另一个处理线程 B 从缓存中读取消息并进行相应的逻辑处理。假设目前进行到了第 y+1 次拉取，以及第 m 次位移提交的时候，也就是 x+6 之前的位移已经确认提交了，处理线程 B 却还正在消费 x+3 的消息。此时如果处理线程 B 发生了异常，待其恢复之后会从第 m 次位移提交处，也就是 x+6 的位置开始拉取消息，那么 x+3 至 x+6 之间的消息就没有得到相应的处理，这样便发生消息丢失的现象。
 
-自动位移提交的方式在正常情况下不会发生消息丢失或重复消费的现象，但是在编程的世界里异常无可避免，与此同时，自动位移提交也无法做到精确的位移管理。故此，在 Kafka 中还提供了手动位移提交的方式。
+自动位移提交的方式在正常情况下不会发生消息丢失或重复消费的现象，但是在实际业务开发中异常难以完全避免，与此同时，自动位移提交也无法做到精确的位移管理。故此，在 Kafka 中还提供了手动位移提交的方式。
 
 手动提交可以细分为**同步提交**和**异步提交**，对应于 KafkaConsumer 中的 `commitSync()`和 `commitAsync()`两种类型的方法。
 
 ```java
 final int minBatchSize = 200;
-List<ConsumerRecord> buffer = new ArrayList<>();
+List<ConsumerRecord<String, String>> buffer = new ArrayList<>();
 while (isRunning.get()) {
-  ConsumerRecords<String, String> records = consumer.poll(1000);
+  ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
   for (ConsumerRecord<String, String> record : records) {
     buffer.add(record);
     if (buffer.size() >= minBatchSize) {
-      // do some logical processing with buffer .
+      // do some logical processing with buffer.
       consumer.commitSync();
       buffer.clear();
     }
@@ -72,13 +74,13 @@ commitSync() 方法会根据 poll() 方法拉取的最新位移来进行提交�
 
 ```java
 final int minBatchSize = 200;
-List<ConsumerRecord> buffer = new ArrayList<>();
+List<ConsumerRecord<String, String>> buffer = new ArrayList<>();
 while (isRunning.get()) {
-  ConsumerRecords<String, String> records = consumer.poll(1000);
+  ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
   for (ConsumerRecord<String, String> record : records) {
     buffer.add(record);
     if (buffer.size() >= minBatchSize) {
-      // do some logical processing with buffer .
+      // do some logical processing with buffer.
       long offset = record.offset();
       TopicPartition partition = new TopicPartition(record.topic(), record.partition());
       consumer.commitSync(Collections.singletonMap(partition, new OffsetAndMetadata(offset + 1)));
@@ -91,11 +93,11 @@ while (isRunning.get()) {
 
 ```java
 while (isRunning.get()) {
-  ConsumerRecords<String, String> records = consumer.poll(1000);
+  ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
   for (TopicPartition partition : records.partitions()) {
     List<ConsumerRecord<String, String>> partitionRecords = records.records(partition);
     for (ConsumerRecord<String, String> record : partitionRecords) {
-      // do some logical processing .
+      // do some logical processing.
       long lastConsumedOffset = partitionRecords.get(partitionRecords.size() - 1).offset();
       consumer.commitSync(
         Collections.singletonMap(partition, new OffsetAndMetadata(lastConsumedOffset + 1)));
@@ -108,7 +110,7 @@ while (isRunning.get()) {
 
 ```java
 while (isRunning.get()) {
-  ConsumerRecords<String, String> records = consumer.poll(1000);
+  ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
   for (ConsumerRecord<String, String> record : records) {
     // do some logical processing.
   }
@@ -129,7 +131,7 @@ while (isRunning.get()) {
 
 commitAsync() 提交的时候同样会有失败的情况发生，那么我们应该怎么处理呢？最简单的方式是重试，问题的关键也在这里。如果某一次异步提交的消费位移为 x，但是提交失败了，然后下一次又异步提交了消费位移为 x+y，这次成功了。如果这里引入了重试机制，前一次的异步提交的消费位移在重试的时候提交成功了，那么此时的消费位移又变为了 x。如果此时发生异常（或者再均衡），那么恢复之后的消费者（或者新的消费者）就会从 x 处开始消费消息，这样就发生了重复消费的问题。
 
-为此我们可以设置一个递增的序号来维护异步提交的顺序，每次位移提交之后就增加序号相对应的值。在遇到位移提交失败需要重试的时候，可以检查所提交的位移和序号的值的大小，如果前者小于后者，则说明有更大的位移已经提交了，不需要再进行本次重试；如果两者相同，则说明可以进行重试提交。除非程序编码错误，否则不会出现前者大于后者的情况。
+为此我们可以设置一个递增的序号来维护异步提交的顺序，每次位移提交之后就增加序号相对应的值。在遇到位移提交失败需要重试的时候，可以检查所提交的位移和序号的值的大小，如果前者小于后者，则说明有更大的位移已经提交了，不需要再进行本次重试；如果两者相同，则说明可以进行重试提交。除非程序编码错误，否则不会出现前者大于后者的情况。另外，由于异步提交本身不保证成功，通常也会在关闭消费者（或退出消费循环）之前调用一次 commitSync() 作为最后的兜底保障。
 
 试想一下，当一个新的消费组建立的时候，它根本没有可以查找的消费位移，或者消费组内的一个新消费者订阅了一个新的主题，它也没有可以查找的消费位移。这时候该从哪里开始消费呢？
 
@@ -159,7 +161,7 @@ for (TopicPartition tp : assignment) {
 
 while (true) {
   ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
-  // consume the record .
+  // consume the record.
 }
 ```
 
@@ -206,7 +208,7 @@ public Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartitio
 Kafka 中的消费位移是存储在一个内部主题中的，而 seek() 方法可以突破这一限制：消费位移可以保存在任意的存储介质中，例如数据库、文件系统等。以数据库为例，我们将消费位移保存在其中的一个表中，在下次消费的时候可以读取存储在数据表中的消费位移并通过 seek() 方法指向这个具体的位置：
 
 ```java
-consumer.subscribe(Arrays.asList(topic)); // 省略 poll ( )方法及 assignment 的逻辑
+consumer.subscribe(Arrays.asList(topic)); // 省略 poll() 方法及 assignment 的逻辑
 for (TopicPartition tp : assignment) {
   long offset = getOffsetFromDB(tp); // 从 DB 中读取消费位移
   consumer.seek(tp, offset);
@@ -216,7 +218,7 @@ while (true) {
   for (TopicPartition partition : records.partitions()) {
     List<ConsumerRecord<String, String>> partitionRecords = records.records(partition);
     for (ConsumerRecord<String, String> record : partitionRecords) {
-      // process the record .
+      // process the record.
       long lastConsumedOffset = partitionRecords.get(partitionRecords.size() - 1).offset();
       // 将消费位移存储在 DB 中
       storeOffsetToDB(partition, lastConsumedOffset + 1);
@@ -231,7 +233,7 @@ seek() 方法为我们提供从特定位置读取消息的能力，我们可以�
 
 再均衡是指分区的所属权从一个消费者转移到另一消费者的行为，它为消费组具备高可用性和伸缩性提供保障，使我们可以既方便又安全地删除消费组内的消费者或往消费组内添加消费者。
 
-不过**在再均衡发生期间，消费组内的消费者是无法读取消息的**。也就是说，在再均衡发生期间的这一小段时间内，消费组会变得不可用。
+不过，在传统的急切式再均衡（Eager Rebalancing）机制下，**再均衡发生期间消费组内的所有消费者都必须停止读取消息并交出分区**，消费组会在这一小段时间内变得完全不可用。这一问题后来通过协作式再均衡协议得到了缓解，具体机制见本节末尾的介绍。
 
 另外，当一个分区被重新分配给另一个消费者时，消费者当前的状态也会丢失。比如消费者消费完某个分区中的一部分消息时还没有来得及提交消费位移就发生了再均衡操作，之后这个分区又被分配给了消费组内的另一个消费者，原来被消费完的那部分消息又被重新消费一遍，也就是发生了重复消费。
 
@@ -242,14 +244,14 @@ Map<TopicPartition, OffsetAndMetadata> currentOffsets = new HashMap<>();
 consumer.subscribe(Arrays.asList(topic), new ConsumerRebalanceListener() {
   @Override
   public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-    //这个方法会在再均衡开始之前和消费者停止读取消息之后被调用
+    // 这个方法会在再均衡开始之前和消费者停止读取消息之后被调用
     consumer.commitSync(currentOffsets);
     currentOffsets.clear();
   }
 
   @Override
   public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-    //这个方法会在重新分配分区之后和消费者开始读取消费之前被调用
+    // 这个方法会在重新分配分区之后和消费者开始读取消费之前被调用
     // do nothing.
   }
 });
@@ -258,7 +260,7 @@ try {
   while (isRunning.get()) {
     ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
     for (ConsumerRecord<String, String> record : records) {
-      // process the record .
+      // process the record.
       currentOffsets.put(new TopicPartition(record.topic(), record.partition()),
                          new OffsetAndMetadata(record.offset() + 1));
       consumer.commitAsync(currentOffsets, null);
@@ -270,6 +272,10 @@ try {
 ```
 
 上面的代码将消费位移暂存到一个局部变量 currentOffsets 中，这样在正常消费的时候可以通过 commitAsync() 方法来异步提交消费位移，在发生再均衡动作之前可以通过再均衡监听器的 onPartitionsRevoked() 回调执行 commitSync() 方法同步提交消费位移，以尽量避免一些不必要的重复消费。
+
+上面描述的再均衡方式也被称为“急切式再均衡”（Eager Rebalancing），其最大的痛点在于再均衡触发时，所有消费者必须立刻停止消费并撤销全部分区，整个消费组会出现短暂的“Stop-the-World”停顿。为了解决这一问题，Kafka 从 2.4 版本开始引入了“协作式再均衡”（Incremental Cooperative Rebalancing）协议。在协作模式下，消费者在再均衡期间不需要交出它们即将继续保留的分区，只有那些确实需要转移到其他消费者的分区才会被短暂撤销。这种增量式的平滑过渡极大地降低了再均衡对业务吞吐量的影响，配合 CooperativeStickyAssignor 分配策略，能够让大规模消费组的扩缩容变得几乎无感。
+
+尽管协作式再均衡显著降低了业务停顿时间，但其底层依然依赖于客户端选举出的 Group Leader 来计算分区分配方案，这在超大规模集群中仍存在单点计算瓶颈和再均衡风暴风险。为此，Kafka 社区在 4.0 版本中正式推出了全新的消费者组再均衡协议（基于 KIP-848，在 3.7 版本中已开始预览）。该协议实现了 Server-side Assignment，将分区分配的计算职责从消费者客户端彻底转移到了 Broker 端的 Group Coordinator。在新的架构下，消费者只需维护简单的心跳连接并被动接收服务端的分配指令，这不仅消除了因客户端 Leader 切换导致的级联再均衡，还将再均衡耗时大幅缩短（官方宣称可达毫秒级）。目前该协议已在 Broker 端默认开启，消费端可通过配置 `group.protocol=consumer` 逐步启用，代表了 Kafka 消费端架构的未来演进方向。
 
 # 5 消费者拦截器
 
@@ -294,15 +300,15 @@ public class ConsumerInterceptorTTL implements ConsumerInterceptor<String, Strin
 
 	@Override
 	public void onCommit(Map<TopicPartition, OffsetAndMetadata> offsets) {
-		//该方法会在提交完消费位移之后调用，可以使用这个方法来记录跟踪所提交的位移信息
+		// 该方法会在提交完消费位移之后调用，可以使用这个方法来记录跟踪所提交的位移信息
 		offsets.forEach((tp, offset) -> System.out.println(tp + ": " + offset.offset()));
 
 	}
 
 	@Override
 	public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String> records) {
-		//该方法会在 poll() 方法返回之前调用，可以对消息进行相应的定制化操作，比如修改返回的消息内容、按照某种规则过滤消息（可能会减少 poll() 方法返回的消息的个数）
-		//如果 onConsume()方法中抛出异常，那么会被捕获并记录到日志中，但是异常不会再向上传递。
+		// 该方法会在 poll() 方法返回之前调用，可以对消息进行相应的定制化操作，比如修改返回的消息内容、按照某种规则过滤消息（可能会减少 poll() 方法返回的消息的个数）
+		// 如果 onConsume() 方法中抛出异常，那么会被捕获并记录到日志中，但是异常不会再向上传递。
 		long now = System.currentTimeMillis();
 		Map<TopicPartition, List<ConsumerRecord<String, String>>> newRecords = new HashMap<>();
 		for (TopicPartition tp : records.partitions()) {
@@ -355,7 +361,7 @@ acquire() 方法和我们通常所说的锁（synchronized、Lock 等）不同�
 
 # 7 分区分配策略
 
-Kafka 提供了消费者客户端参数 `partition.assignment.strategy` 来设置消费者与订阅主题之间的分区分配策略。默认情况下，此参数的值为 `org.apache.kafka.clients.consumer.RangeAssignor`，即采用 RangeAssignor 分配策略。除此之外，Kafka 还提供了另外两种分配策略：RoundRobinAssignor 和 StickyAssignor。
+Kafka 提供了消费者客户端参数 `partition.assignment.strategy` 来设置消费者与订阅主题之间的分区分配策略。在早期版本中，默认采用的是 `org.apache.kafka.clients.consumer.RangeAssignor`，即 RangeAssignor 分配策略；从 Kafka 3.0 版本开始，默认值变更为 `[RangeAssignor, CooperativeStickyAssignor]`，即优先使用 RangeAssignor，当消费组内出现混合订阅等 RangeAssignor 无法处理的场景时，才会降级使用 CooperativeStickyAssignor。目前 Kafka 主要提供了四种分配策略：RangeAssignor、RoundRobinAssignor、StickyAssignor 以及自 2.4 版本引入的 CooperativeStickyAssignor。
 
 RangeAssignor 分配策略的原理是按照消费者总数和分区总数进行整除运算来获得一个跨度，然后将分区按照跨度进行平均分配，以保证分区尽可能均匀地分配给所有的消费者。对于每一个主题，RangeAssignor 策略会将消费组内所有订阅这个主题的消费者按照名称的字典序排序，然后为每个消费者划分固定的分区范围，如果不够平均分配，那么字典序靠前的消费者会被多分配一个分区。
 
@@ -417,6 +423,8 @@ RoundRobinAssignor 分配策略会按照消费者 C0 和 C2 进行重新轮询�
 
 如果发生分区重分配，那么对于同一个分区而言，有可能之前的消费者和新指派的消费者不是同一个，之前消费者进行到一半的处理还要在新指派的消费者中再次复现一遍，这显然很浪费系统资源。StickyAssignor 分配策略如同其名称中的“sticky”一样，让分配策略具备一定的“粘性”，尽可能地让前后两次分配相同，进而减少系统资源的损耗及其他异常情况的发生。
 
+在 StickyAssignor 的基础上，Kafka 社区在 2.4 版本进一步推出了 CooperativeStickyAssignor。它不仅继承了 StickyAssignor 保持分区分配粘性和均匀性的优点，还原生支持前述的协作式再均衡协议。这意味着当集群发生节点上下线时，CooperativeStickyAssignor 能够在不中断现有正常分区消费的前提下，仅针对需要迁移的分区进行多轮次的协作交接，在性能和稳定性上都更具优势。也正因如此，自 Kafka 3.0 版本起，它被加入客户端默认的分配策略列表，与 RangeAssignor 共同构成默认值 `[RangeAssignor, CooperativeStickyAssignor]`：优先使用 RangeAssignor，当其无法胜任时降级为 CooperativeStickyAssignor。如果希望全面启用协作式再均衡，则需要将其显式配置为唯一的分配策略。
+
 # 8 参数解析
 
 - fetch.min.bytes
@@ -425,7 +433,7 @@ RoundRobinAssignor 分配策略会按照消费者 C0 和 C2 进行重新轮询�
 
 - fetch.max.bytes
 
-用来配置 Consumer 在一次拉取请求中从 Kafka 中拉取的最大数据量，默认值为 50MB。该参数设定的不是绝对的最大值，如果在第一个非空分区中拉取的第一条消息大于该值，那么该消息将仍然返回，以确保消费者继续工作。
+用来配置 Consumer 在一次拉取请求中从 Kafka 中拉取的最大数据量，默认值为 52428800（即 50 MiB）。该参数设定的不是绝对的最大值，如果在第一个非空分区中拉取的第一条消息大于该值，那么该消息将仍然返回，以确保消费者继续工作。
 
 - fetch.max.wait.ms
 
@@ -445,15 +453,15 @@ RoundRobinAssignor 分配策略会按照消费者 C0 和 C2 进行重新轮询�
 
 - exclude.internal.topics
 
-Kafka 中有两个内部的主题：`_consumer_offsets` 和 `_transaction_state`，`exclude.internal.topics` 用来指定 Kafka 中的内部主题是否可以向消费者公开，默认值为 true。如果设置为 true，那么只能使用 subscribe(Collection) 的方式而不能使用 subscribe(Pattern) 的方式来订阅内部主题，设置为 false 则没有这个限制。
+Kafka 中有两个内部的主题：`__consumer_offsets` 和 `__transaction_state`，`exclude.internal.topics` 用来指定 Kafka 中的内部主题是否可以向消费者公开，默认值为 true。如果设置为 true，那么只能使用 subscribe(Collection) 的方式而不能使用 subscribe(Pattern) 的方式来订阅内部主题，设置为 false 则没有这个限制。
 
 - receive.buffer.bytes
 
-这个参数用来设置 Socket 接收消息缓冲区的大小，默认为 64M。如果设置为 -1，则使用操作系统的默认值。如果 Consumer 与 Kafka 处于不同的机房，则可以适当调大这个参数值。
+这个参数用来设置 Socket 接收消息缓冲区的大小，默认值为 65536（即 64KB）。如果设置为 -1，则使用操作系统的默认值。如果 Consumer 与 Kafka 处于不同的机房，则可以适当调大这个参数值。
 
 - send.buffer.bytes
 
-这个参数用来设置 Socket 发送消息缓冲区，默认值为 128M。如果设置为 -1，则使用操作系统的默认值。
+这个参数用来设置 Socket 发送消息缓冲区，默认值为 131072（即 128KB）。如果设置为 -1，则使用操作系统的默认值。
 
 - request.timeout.ms
 
@@ -462,3 +470,7 @@ Kafka 中有两个内部的主题：`_consumer_offsets` 和 `_transaction_state`
 - isolation.level
 
 这个参数用来配置消费者的事务隔离级别。字符串类型，有效值为“read_uncommitted”和“read_committed”，表示消费者所消费到的位置，如果设置为“read_committed”，那么消费者就会忽略事务未提交的消息，默认情况下为“read_uncommitted”，即可以消费到 HW（High Watermark）处的位置。
+
+- client.rack
+
+该参数用于指定消费者当前所在的机架或可用区标识。随着 Kafka 广泛部署于 Kubernetes 等多可用区（Multi-AZ）的云原生环境中，跨机房拉取消息带来的网络带宽成本和延迟问题日益凸显，通过配置此参数，Broker 在处理 Fetch 请求时会触发“机架感知”机制，优先将位于相同可用区的副本数据返回给消费者。结合 KRaft 模式下更精确的元数据拓扑管理，这种就近拉取策略不仅大幅降低了跨可用区的网络流量费用，还显著缩短了端到端的消息拉取延迟，是现代分布式云架构下进行 Kafka 性能调优不可或缺的一环。

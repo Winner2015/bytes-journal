@@ -2,7 +2,7 @@
 
 所谓的幂等，简单地说就是对接口的多次调用所产生的结果和调用一次是一致的。生产者在进行重试的时候有可能会重复写入消息，而使用 Kafka 的幂等性功能之后可以避免这种情况。
 
-开启幂等性功能的方式很简单，只需要显式地将生产者客户端参数 `enable.idempotence` 设置为 true 即可（这个参数的默认值为 false）。
+开启幂等性功能的方式很简单，只需要将生产者客户端参数 `enable.idempotence` 设置为 true 即可。在 Kafka 3.0.0 之前，这个参数的默认值为 false；自 Kafka 3.0.0 起，为了提升默认的数据可靠性，该参数的默认值已更改为 true，使用较新版本的客户端无需显式设置即可默认开启幂等性。
 
 为了实现生产者的幂等性，Kafka 为此引入了 ProducerId（PID）和序列号（sequence number）这两个概念。每个新的生产者实例在初始化的时候都会被分配一个 PID，这个 PID 对用户而言是完全透明的。对于每个 PID，消息发送到的每一个分区都有对应的序列号，这些序列号从 0 开始单调递增。生产者每发送一条消息就会将 <PID, 分区> 对应的序列号的值加 1。
 
@@ -16,7 +16,7 @@ broker 端会在内存中为每一对 <PID, 分区> 维护一个序列号。对�
 
 为了实现事务，应用程序必须提供唯一的 transactionalId，这个 transactionalId 通过客户端参数 `transactional.id` 来显式设置。事务要求生产者开启幂等特性，因此通过将 `transactional.id` 参数设置为非空从而开启事务特性的同时需要将 `enable.idempotence` 设置为 true。
 
-transactionalId 与 PID 一一对应，两者之间所不同的是 transactionalId 由用户显式设置，而 PID 是由 Kafka 内部分配的。另外，为了保证新的生产者启动后具有相同 transactionalId 的旧生产者能够立即失效，每个生产者通过 transactionalId 获取 PID 的同时，还会获取一个单调递增的 producer epoch。
+transactionalId 与 PID 一一对应，两者的区别在于 transactionalId 由用户显式设置，而 PID 是由 Kafka 内部分配的。另外，为了保证新的生产者启动后具有相同 transactionalId 的旧生产者能够立即失效，每个生产者通过 transactionalId 获取 PID 的同时，还会获取一个单调递增的 producer epoch。
 
 从生产者的角度分析，通过事务 Kafka 可以保证跨生产者会话的消息幂等发送，以及跨生产者会话的事务恢复。前者表示具有相同 transactionalId 的新生产者实例被创建且工作的时候，旧的且拥有相同 transactionalId 的生产者实例将不再工作。后者指当某个生产者实例宕机后，新的生产者实例可以保证任何未完成的旧事务要么被提交，要么被中止，如此可以使新的生产者实例从一个正常的状态开始工作。
 
@@ -30,9 +30,9 @@ properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList);
 properties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionid);
 KafkaProducer<String, String> producer = new KafkaProducer<>(properties);
 producer.initTransactions();
-producer.beginTransaction();
 
 try {
+  producer.beginTransaction();
   // 处理业务逻辑并创建 ProducerRecord
   ProducerRecord<String, String> record1 = new ProducerRecord<>(topic, "msg1");
   producer.send(record1);
@@ -42,17 +42,26 @@ try {
   producer.send(record3);
   // 处理一些其他逻辑
   producer.commitTransaction();
-} catch (ProducerFencedException e) {
+} catch (ProducerFencedException | OutOfOrderSequenceException | AuthorizationException e) {
+  // 生产者已被隔离，无法再对本实例的事务执行任何操作（此时调用 abortTransaction() 会再次抛出异常），
+  // 应记录日志并关闭当前生产者实例
+  producer.close();
+} catch (KafkaException e) {
+  // 其他可恢复异常才中止当前事务，之后可以重新开启事务进行重试
   producer.abortTransaction();
 }
 producer.close();
 ```
 
+注意，当捕获到 ProducerFencedException 时，说明具有相同 transactionalId 的新生产者实例已经接管，当前实例已无法对该事务执行任何操作，此时调用 abortTransaction() 只会再次抛出异常，正确的做法是记录日志并关闭当前生产者实例；只有遇到其他可恢复的异常时，才适合调用 abortTransaction() 中止事务并重试。
+
 在消费端有一个参数 `isolation.level`，与事务有着莫大的关联，这个参数的默认值为 `read_uncommitted`，意思是说消费端应用可以看到（消费到）未提交的事务，当然对于已提交的事务也是可见的。这个参数还可以设置为 `read_committed`，表示消费端应用不可以看到尚未提交的事务内的消息。举个例子，如果生产者开启事务并向某个分区发送 3 条消息 msg1、msg2 和 msg3，在执行 commitTransaction() 或 abortTransaction() 方法前，设置为 `read_committed` 的消费端应用是消费不到这些消息的，不过在 KafkaConsumer 内部会缓存这些消息，直到生产者执行 commitTransaction() 方法之后它才能将这些消息推送给消费端应用。反之，如果生产者执行了 abortTransaction()方法，那么 KafkaConsumer 会将这些缓存的消息丢弃而不推送给消费端应用。
+
+值得注意的是，事务机制在近年的 Kafka 版本中仍在持续演进。Kafka 2.5 引入的 KIP-447 为“consume-transform-produce”模式提供了可扩展的精确一次语义：KafkaProducer.sendOffsetsToTransaction() 新增了接收 ConsumerGroupMetadata 的重载方法，使消费位移的提交与事务绑定得更加紧密，能够有效避免消费者组再平衡期间因分区重新分配而导致的重复提交问题。此外，随着 KRaft 模式逐步取代 ZooKeeper（自 Kafka 4.0 起已完全移除 ZooKeeper），broker 侧元数据的管理与恢复更加轻量；需要说明的是，事务协调器（Transaction Coordinator）的状态自始至终保存在内部主题 __transaction_state 中，事务的恢复并不直接依赖 ZooKeeper。
 
 # 2 TTL 队列
 
-通过消息的 timestamp 字段和 ConsumerInterceptor 接口的 onConsume() 方法可以实现消息的 TTL 功能。实际应用中，消息超时之后一般不会被直接丢弃，而是配合死信队列使用，方便应用在此之后通过消费死信队列中的消息来诊断系统的运行概况。
+通过消息的 timestamp 字段和 ConsumerInterceptor 接口的 onConsume() 方法可以实现消息的 TTL 功能。需要说明的是，这种拦截器方式是在消息已经拉取到消费端之后才将其过滤，超时消息占用的网络带宽并没有节省下来，因此更多算是一种轻量的实现手段，对带宽敏感的场景可以考虑由 Kafka Streams 等中间层先行过滤，避免超时消息继续向下游业务消费者传输。另外，下面的示例仅演示在消费端过滤超时消息的基本逻辑；实际应用中，消息超时之后一般不会被直接丢弃，而是转存到死信队列中，方便应用在此之后通过消费死信队列中的消息来诊断系统的运行概况。
 
 如果要实现自定义每条消息 TTL 的功能，需要借助消息中的 header 字段来定制化每条消息的超时时间：
 
@@ -65,26 +74,27 @@ public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String>
     List<ConsumerRecord<String, String>> tpRecords = records.records(tp);
     List<ConsumerRecord<String, String>> newTpRecords = new ArrayList<>();
     for (ConsumerRecord<String, String> record : tpRecords) {
-
       Headers headers = record.headers();
       long ttl = -1;
       for (Header header : headers) {
         // 判断 headers 中是否有 key 为"ttl"的 Header
         if (header.key().equalsIgnoreCase("ttl")) {
           ttl = BytesUtils.bytesToLong(header.value());
-          // 消息超时判定
-          if (ttl > 0 && now - record.timestamp() < ttl * 1000) {
-            newTpRecords.add(record);
-          } else {
-            // 没有设置 TTL，不需要超时判定
-            newTpRecords.add(record);
-          }
         }
       }
+      // 消息超时判定
+      if (ttl > 0 && now - record.timestamp() > ttl * 1000) {
+        // 已超时，不加入新列表，即过滤掉该消息
+      } else {
+        // 没有设置 TTL，不需要超时判定
+        newTpRecords.add(record);
+      }
     }
-
-    return new ConsumerRecords<>(newRecords);
+    if (!newTpRecords.isEmpty()) {
+      newRecords.put(tp, newTpRecords);
+    }
   }
+  return new ConsumerRecords<>(newRecords);
 }
 ```
 
@@ -100,13 +110,13 @@ public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String>
 
 原生的 Kafka 并不具备延时队列的功能，不过我们可以对其进行改造来实现。Kafka 实现延时队列的方式也有很多种，比如与 TTL 队列类似，可以通过消费者客户端拦截器来实现。
 
-不过使用拦截器的方式来实现延时的功能具有很大的局限性，某一批拉取到的消息集中有一条消息的延时时间很长，其他的消息延时时间很短而很快被消费，那么这时该如何处理呢？下面考虑以下这几种情况：
+不过使用拦截器的方式来实现延时的功能具有很大的局限性，某一批拉取到的消息中，有一条消息的延时时间很长，其他的消息延时时间很短而很快被消费，那么这时该如何处理呢？下面考虑以下这几种情况：
 
 - 如果这时提交消费位移，那么延时时间很长的那条消息会丢失。
 - 如果这时不继续拉取消息而等待这条延时时间很长的消息到达延时时间，这样又会导致消费滞后很多，而且如果位于这条消息后面的很多消息的延时时间很短，那么也会被这条消息无端地拉长延时时间，从而大大地降低了延时的精度。
 - 如果这个时候不提交消费位移而继续拉取消息，等待这条延时时间很长的消息满足条件之后再提交消费位移，那么在此期间这条消息需要驻留在内存中，而且需要一个定时机制来定时检测是否满足被消费的条件，当这类消息很多时必定会引起内存的暴涨，另一方面当消费很大一部分消息之后这条消息还是没有能够被消费，此时如果发生异常，则会由于长时间的未提交消费位移而引起大量的重复消费。
 
-有一种改进方案，消费者在拉取一批消息之后，如果这批消息中有未到达延时时间的消息，那么就将这条消息重新写入主题等待后续再次消费 。 这个改进方案看起来很不错，但是当消费滞后很多（消息大量堆积）的时候，原本这条消息只要再等待 5 秒就能够被消费，但这里却将其再次存入主题，等到再次读取到这条消息的时候有可能已经过了半小时 。 由此可见，这种改进方案无法保证延时精度，故而也很难真正地投入现实应用之中。
+有一种改进方案，消费者在拉取一批消息之后，如果这批消息中有未到达延时时间的消息，那么就将这条消息重新写入主题等待后续再次消费。这个改进方案看起来很不错，但是当消费滞后很多（消息大量堆积）的时候，原本这条消息只要再等待 5 秒就能够被消费，但这里却将其再次存入主题，等到再次读取到这条消息的时候有可能已经过了半小时。由此可见，这种改进方案无法保证延时精度，故而也很难真正地投入现实应用之中。
 
 在了解了拦截器的实现方式之后，我们再来看另一种可行性方案：在发送延时消息的时候并不是先投递到要发送的真实主题（real_topic）中，而是先投递到一些 Kafka 内部的主题（delay topic）中，这些内部主题对用户不可见，然后通过一个自定义的服务拉取这些内部主题中的消息，并将满足条件的消息再投递到要发送的真实的主题中，消费者所订阅的还是真实的主题。
 
@@ -134,9 +144,7 @@ public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String>
 
 后台服务获取消息之后马上会转发到真实的主题中，而订阅此主题的消费者也就可以及时地消费消息，在这一阶段中并无太大的优化空间。反观消息从生产者到缓存再到后台服务的过程中需要一个等待延时时间的行为，在这个过程中有很大的空间来做进一步的优化。
 
-到这里，自然而然会想起前面大篇幅介绍过的时间轮。
-
-所不同的是，这里需要的是单层时间轮。而且延时消息也不再是缓存在内存中，而是暂存至文件中。时间轮中每个时间格代表一个延时时间，并且每个时间格也对应一个文件，整体上可以看作单层文件时间轮。
+到这里，自然而然会想起前面大篇幅介绍过的时间轮。需要注意的是，这里的时间轮与 Kafka 内部 purgatory 所使用的多层时间轮定位不同：内部时间轮服务于 broker 的短时定时任务，任务仅驻留在内存中即可；而延时队列中的消息属于不能丢失的业务数据，仅靠内存无法在进程异常退出后恢复。因此这里需要的是单层时间轮，而且延时消息也不再是缓存在内存中，而是暂存至文件中。时间轮中每个时间格代表一个延时时间，并且每个时间格也对应一个文件，整体上可以看作单层文件时间轮。
 
 ![](imgs/5.png)
 
@@ -149,6 +157,8 @@ public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String>
 单层文件时间轮的方案与延时级别的实现方案一样可以将延时服务与 Kafka 进程进行一对一配比的同机部署，以保证整体服务的可用性。
 
 ![](imgs/6.png)
+
+尽管基于 Kafka 改造的延时队列方案能够满足大部分业务需求，但随着云原生与流处理技术的发展，业界也出现了一些原生支持延时消息的替代选型。例如 Apache Pulsar 在 broker 层直接内置了延时消息投递能力，通过内存中的时间轮跟踪未到期的消息，无需像 Kafka 这样额外部署 DelayService 之类的独立进程；不过其延时状态主要维护在内存中，broker 重启或故障转移时的投递行为与可靠性需要结合具体版本仔细评估。如果坚持使用 Kafka 生态，则可以关注自 3.6 起以早期访问（Early Access）形式引入的分层存储（Tiered Storage，KIP-405）：长时间未触发的延时消息可以随日志段一起卸载到对象存储中，从而缓解本地磁盘容量与文件句柄占用的压力，让单层文件时间轮方案能够支撑更大规模的延时调度场景（这一结合方式目前更多处于探索阶段，落地前建议结合所用版本验证）。
 
 # 4 死信队列
 
@@ -164,9 +174,9 @@ public ConsumerRecords<String, String> onConsume(ConsumerRecords<String, String>
 
 ![](imgs/7.png)
 
-RabbitMQ 中的生产者将消息发送到交换器 Exchange 中，然后由交换器根据指定的路由键来将消息路由到一个或多个队列中，消费者消费的是队列中的消息。从整体上而言，RabbitMQ 通过路由键将原本发往一个地方的消息做了区分，然后让不同的消费者消费到自己要关注的消息。
+RabbitMQ 中的生产者将消息发送到交换器 Exchange 中，然后由交换器根据指定的路由键来将消息路由到一个或多个队列中，消费者消费的是队列中的消息。RabbitMQ 通过路由键实现了消息的细粒度分发，让不同的消费者消费到自己要关注的消息。
 
-Kafka 默认按照主题进行路由，也就是说，消息发往主题之后会被订阅的消费者全盘接收， 这里没有类似消息路由的功能来将消息进行二级路由，这一点从逻辑概念上来说并无任何问题。从业务应用上而言，如果不同的业务流程复用相同的主题，就会出现消息接收时的混乱，这种问题可以从设计上进行屏蔽，如果需要消息路由，那么完全可以通过细粒度化切分主题来实现。
+Kafka 默认按照主题进行路由，也就是说，消息发往主题之后会被订阅的消费者全盘接收，这里没有类似消息路由的功能来将消息进行二级路由，这一点从逻辑概念上来说并无任何问题。从业务应用上而言，如果不同的业务流程复用相同的主题，就会出现消息接收时的混乱，这种问题可以从设计上进行屏蔽，如果需要消息路由，那么完全可以通过细粒度化切分主题来实现。
 
 但是有时候一些历史遗留的问题迫使我们期望 Kafka 具备一个消息路由的功能。比如原来的应用系统采用了类似 RabbitMQ 这种消息路由的生产消费模型，运行一段时间之后又需要更换为 Kafka，并且变更之后还需要保留原有系统的编程逻辑。对此，我们首先需要在这个整体架构中做一层关系映射。
 
@@ -182,14 +192,14 @@ Kafka 默认按照主题进行路由，也就是说，消息发往主题之后�
 
 # 6 消息轨迹
 
-在使用消息中间件时，我们时常会遇到各种问题：消息发送成功了吗？为什么发送的消息在消费端消费不到？为什么消费端重复消费了消息？对于此类问题，我们可以引入消息轨迹来解决。**消息轨迹**指的是一条消息从生产者发出，经由 broker 存储，再到消费者消费的整个过程中，各个相关节点的状态、时间、地点等数据汇聚而成的完整链路信息。生产者、broker、消费者这 3 个角色在处理消息的过程中都会在链路中增加相应的信息，将这些信息汇聚、处理之后就可以查询任意消息的状态，进而为生产环境中的故障排除提供强有力的数据支持。
+在使用消息中间件时，我们时常会遇到各种问题：消息发送成功了吗？为什么发送的消息在消费端消费不到？为什么消费端重复消费了消息？对于此类问题，我们可以引入消息轨迹来解决。所谓**消息轨迹**，是指一条消息从生产者发出，经由 broker 存储，再到消费者消费的整个过程中，各个相关节点的状态、时间、地点等数据汇聚而成的完整链路信息。生产者、broker、消费者这 3 个角色在处理消息的过程中都会在链路中增加相应的信息，将这些信息汇聚、处理之后就可以查询任意消息的状态，进而为生产环境中的故障排除提供强有力的数据支持。
 
 对消息轨迹而言，最常见的实现方式是封装客户端，在保证正常生产消费的同时添加相应的轨迹信息埋点逻辑。无论生产，还是消费，在执行之后都会有相应的轨迹信息，我们需要将这些信息保存起来。这里可以参考 Kafka 中的做法，它将消费位移信息保存在主题 _consumer_offsets 中。对应地，我们同样可以将轨迹信息保存到 Kafka 的某个主题中。
 
 ![](imgs/10.png)
 
-生产者在将消息正常发送到用户主题 real_topic 之后（或者消费者在拉取到消息消费之后）会将轨迹信息发送到主题 trace_topic 中。这里有两种发送方式：第一种是直接通过 KafkaProducer 发送，为了不对普通的消息发送造成影响，可以采取“低功耗”的（比如异步、acks=0 等）发送配置，不过有可能会造成轨迹信息的丢失。另一种方式是将轨迹信息保存到本地磁盘，然后通过某个传输工具（比如 Flume）来同步到 Kafka 中，这种方式对正常发送/消费逻辑的影响较小、可靠性也较高，但是需要引入额外的组件，增加了维护的风险。
+生产者在将消息正常发送到用户主题 real_topic 之后（或者消费者在拉取到消息消费之后）会将轨迹信息发送到主题 trace_topic 中。这里有两种发送方式：第一种是直接通过 KafkaProducer 发送，为了不对普通的消息发送造成影响，可以采取“低功耗”的（比如异步、acks=0 等）发送配置，不过有可能会造成轨迹信息的丢失。另一种方式是将轨迹信息保存到本地磁盘，然后通过某个传输工具（比如 Flume、Filebeat、Fluentd 等）来同步到 Kafka 中，这种方式对正常发送/消费逻辑的影响较小、可靠性也较高，但是需要引入额外的组件，增加了维护的风险。
 
 消息轨迹中包含生产者、broker 和消费者的消息，但是上图中只提及了生产者和消费者的轨迹信息的保存而并没有提及 broker 信息的保存。生产者在发送消息之后通过确认信息来得知是否已经发送成功，而在消费端就更容易辨别一条消息是消费成功了还是失败了，对此我们可以通过客户端的信息反推出 broker 的链路信息。当然我们也可以在 broker 中嵌入一个前置程序来获得更多的链路信息，比如消息流入时间、消息落盘时间等。不过在 broker 内嵌前置程序，如果有相关功能更新，难免需要重启服务，如果只通过客户端实现消息轨迹，则可以简化整体架构、灵活部署。
 
-轨迹信息保存到主题 trace_topic 之后，还需要通过一个专门的处理服务模块对消息轨迹进行索引和存储，方便有效地进行检索。在查询检索页面进行检索的时候可以根据具体的消息 ID 进行精确检索，也可以根据消息的 key、主题、发送/接收时间进行模糊检索，还可以根据用户自定义的 Tags 信息进行有针对性的检索，最终查询出消息的一条链路轨迹。 
+轨迹信息保存到主题 trace_topic 之后，还需要通过一个专门的处理服务模块对消息轨迹进行索引和存储，方便有效地进行检索。在查询检索页面进行检索的时候可以根据具体的消息 ID 进行精确检索，也可以根据消息的 key、主题、发送/接收时间进行模糊检索，还可以根据用户自定义的 Tags 信息进行有针对性的检索，最终查询出消息的一条链路轨迹。

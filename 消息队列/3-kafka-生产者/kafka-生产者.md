@@ -105,7 +105,7 @@ producer.send(record, new Callback() {
 
 - acks=1
 
-**默认值即为 1**。生产者发送消息之后，只要分区的 leader 副本成功写入消息，那么它就会收到来自服务端的成功响应。如果消息无法写入 leader 副本，比如在 leader 副本崩溃、重新选举新的 leader 副本的过程中，那么生产者就会收到一个错误的响应，为了避免消息丢失，生产者可以选择重发消息。
+在 Kafka 3.0 之前的版本中，默认值即为 1；但从 Kafka 3.0 版本起，**acks 的默认值已更改为 -1（即 all）**，以配合默认开启的幂等性生产者，提供更高的数据可靠性保障。生产者发送消息之后，只要分区的 leader 副本成功写入消息，那么它就会收到来自服务端的成功响应。如果消息无法写入 leader 副本，比如在 leader 副本崩溃、重新选举新的 leader 副本的过程中，那么生产者就会收到一个错误的响应，为了避免消息丢失，生产者可以选择重发消息。
 
 ![](imgs/2.png)
 
@@ -119,6 +119,8 @@ producer.send(record, new Callback() {
 
 但这并不意味着消息就一定可靠，因为 ISR 中可能只有 leader 副本，这样就退化成了 acks=1 的情况。要获得更高的消息可靠性，需要与 `min.insync.replicas` 等参数联动。
 
+在探讨确认模式时，不得不提及现代 Kafka 默认启用的幂等性生产者（Idempotent Producer）机制。在过去，如果网络发生抖动导致生产者未收到 Broker 的确认响应，生产者进行重试就不可避免地会造成消息重复写入。幂等性生产者机制自 Kafka 0.11 引入，并从 Kafka 3.0 开始默认开启（`enable.idempotence=true`）：生产者在初始化时会从 Broker 获取一个唯一的 Producer ID（PID），发往每个分区的消息都会携带单调递增的序列号（Sequence Number），Broker 端会据此进行去重校验。这意味着即使在 acks=all 且发生频繁网络重试的恶劣环境下，Kafka 也能严格保证同一生产者会话内单分区消息的精确一次（Exactly-Once）语义，从而解决长期以来重试导致数据重复的痛点。
+
 # 3 内部实现
 
 ![](imgs/4.png)
@@ -131,15 +133,17 @@ producer.send(record, new Callback() {
 
 如果 Kafka 客户端提供的几种序列化器都无法满足应用需求，则可以选择使用如 Avro、JSON、Thrift、ProtoBuf 和 Protostuff 等通用的序列化工具来实现，或者使用自定义类型的序列化器来实现。
 
+在实际的企业级应用中，单纯使用基础的序列化器往往难以应对数据结构随业务演进而不断变化的挑战，目前业界广泛采用的实践是将序列化框架（如 Avro、Protobuf 或 JSON Schema）与 Schema Registry（模式注册中心）深度集成。在这种架构下，生产者在序列化消息时不会将完整的结构定义随消息一起发送，而是向 Schema Registry 注册结构并获取一个轻量级的全局唯一 ID，仅将该 ID 和序列化后的二进制载荷发送给 Kafka。这不仅大幅减小了网络传输的消息体积，还使消费者能够根据 ID 动态拉取对应的解析规则，实现上下游系统间数据契约的向前和向后兼容性治理。
+
 ## 3.2 分区器
 
 消息在通过 send() 方法发往 broker 的过程中，有可能需要经过拦截器（Interceptor）、序列化器（Serializer）和分区器（Partitioner）的一系列作用之后才能被真正地发往 broker。拦截器一般不是必需的，而序列化器是必需的。消息经过序列化之后就需要确定它发往的分区，如果消息 ProducerRecord 中指定了 partition 字段，那么就不需要分区器的作用，因为 partition 代表的就是所要发往的分区号。
 
 如果消息 ProducerRecord 中没有指定 partition 字段，那么就需要依赖分区器，根据 key 这个字段来计算 partition 的值。分区器的作用就是为消息分配分区。
 
-Kafka 中提供的默认分区器是 `org.apache.kafka.clients.producer.internals.DefaultPartitioner`，它实现了 `org.apache.kafka.clients.producer.Partitioner` 接口。
+在早期版本中，Kafka 提供的默认分区器是 `org.apache.kafka.clients.producer.internals.DefaultPartitioner`，它实现了 `org.apache.kafka.clients.producer.Partitioner` 接口。但自 Kafka 3.3 起，该类已被标记为废弃，并在 Kafka 4.0 中被移除：只要不显式指定 `partitioner.class`，分区计算就会由生产者内部支持粘性分区特性的 `BuiltInPartitioner` 来完成。
 
-如果 key 不为 null，那么默认的分区器会对 key 进行哈希（采用 MurmurHash2 算法，具备高运算性能及低碰撞率），最终根据得到的哈希值来计算分区号，拥有相同 key 的消息会被写入同一个分区。如果 key 为 null，那么消息将会以轮询的方式发往主题内的各个可用分区。
+如果 key 不为 null，那么默认的分区器会对 key 进行哈希（采用 MurmurHash2 算法，具备高运算性能及低碰撞率），最终根据得到的哈希值来计算分区号，拥有相同 key 的消息会被写入同一个分区。如果 key 为 null，在 Kafka 2.4 之前的版本中，消息会以轮询的方式发往主题内的各个可用分区；但自 Kafka 2.4 版本起，默认采用了粘性分区（Sticky Partitioning）策略，消息会优先集中发往同一个分区以凑满批次（Batch），从而提高吞吐量，只有在当前分区的批次被发送出去（批次写满或到达 linger.ms）之后，才会切换到下一个分区。
 
 在不改变主题分区数量的情况下，key 与分区之间的映射可以保持不变。不过，一旦主题中增加了分区，那么就难以保证 key 与分区之间的映射关系了。
 
@@ -199,11 +203,11 @@ RecordAccumulator 主要用来缓存消息以便 Sender 线程可以批量发送
 
 - retries 和 retry.backoff.ms
 
-retries 参数用来配置生产者重试的次数，默认值为 0，即在发生异常的时候不进行任何重试动作。消息在从生产者发出到成功写入服务器之前可能发生一些临时性的异常，比如网络抖动、leader 副本的选举等，这种异常往往是可以自行恢复的，生产者可以通过配置 retries 大于 0 的值，以此通过内部重试来恢复而不是一味地将异常抛给生产者的应用程序。如果重试达到设定的次数，那么生产者就会放弃重试并返回异常。不过并不是所有的异常都是可以通过重试来解决的，比如消息太大，超过 `max.request.size` 参数配置的值时，这种方式就不可行了。
+retries 参数用来配置生产者重试的次数。在 Kafka 3.0 之前的版本中，默认值为 0，即在发生异常的时候不进行任何重试动作；但从 3.0 版本开始，由于默认启用了幂等性生产者，`retries` 的默认值变更为 `Integer.MAX_VALUE`（即 2147483647），生产者会在可重试异常发生时持续重试，直到达到 `delivery.timeout.ms` 限定的投递超时时间（默认值为 120 秒）才会放弃并返回异常。消息在从生产者发出到成功写入服务器之前可能发生一些临时性的异常，比如网络抖动、leader 副本的选举等，这种异常往往是可以自行恢复的，生产者可以通过配置 retries 大于 0 的值，以此通过内部重试来恢复而不是一味地将异常抛给生产者的应用程序。如果重试达到设定的次数，那么生产者就会放弃重试并返回异常。不过并不是所有的异常都是可以通过重试来解决的，比如消息太大，超过 `max.request.size` 参数配置的值时，这种方式就不可行了。
 
 重试还和另一个参数 `retry.backoff.ms` 有关，这个参数的默认值为 100，它用来设定两次重试之间的时间间隔，避免无效的频繁重试。
 
-Kafka 可以保证同一个分区中的消息是有序的。如果生产者按照一定的顺序发送消息，那么这些消息也会顺序地写入分区，进而消费者也可以按照同样的顺序消费它们。对于某些应用来说，顺序性非常重要，比如 MySQL 的 binlog 传输，如果出现错误就会造成非常严重的后果。如果将 acks 参数配置为非零值，并且 `max.in.flight.requests.per.connection` 参数配置为大于 1 的值，那么就会出现错序的现象：如果第一批次消息写入失败，而第二批次消息写入成功，那么生产者会重试发送第一批次的消息，此时如果第一批次的消息写入成功，那么这两个批次的消息就出现了错序。一般而言，在需要保证消息顺序的场合建议把参数 `max.in.flight.requests.per.connection` 配置为 1，而不是把 acks 配置为 0，不过这样也会影响整体的吞吐。
+Kafka 可以保证同一个分区中的消息是有序的。如果生产者按照一定的顺序发送消息，那么这些消息也会顺序地写入分区，进而消费者也可以按照同样的顺序消费它们。对于某些应用来说，顺序性非常重要，比如 MySQL 的 binlog 传输，如果出现错误就会造成非常严重的后果。如果将 acks 参数配置为非零值，并且 `max.in.flight.requests.per.connection` 参数配置为大于 1 的值，那么就会出现错序的现象：如果第一批次消息写入失败，而第二批次消息写入成功，那么生产者会重试发送第一批次的消息，此时如果第一批次的消息写入成功，那么这两个批次的消息就出现了错序。在早期版本中，需要保证消息顺序的场合一般建议把参数 `max.in.flight.requests.per.connection` 配置为 1，而不是把 acks 配置为 0，不过这样也会影响整体的吞吐。而自 Kafka 0.11 引入、3.0 默认开启幂等性生产者（`enable.idempotence=true`）后，只要 `max.in.flight.requests.per.connection` 不大于 5，Kafka 就能严格保证单分区的消息顺序，从而兼顾高吞吐与有序性。
 
 - compression.type
 
@@ -224,3 +228,7 @@ Kafka 可以保证同一个分区中的消息是有序的。如果生产者按�
 - request.timeout.ms
 
 这个参数用来配置 Producer 等待请求响应的最长时间，默认值为 30000（ms）。请求超时之后可以选择进行重试。注意这个参数需要比 broker 端参数 `replica.lag.time.max.ms` 的值要大，这样可以减少因客户端重试而引起的消息重复的概率。
+
+- socket.connection.setup.timeout.ms 和 socket.connection.setup.timeout.max.ms
+
+这两个参数自 Kafka 2.7 起引入。随着 Kafka 越来越多地被部署在 Kubernetes 等云原生容器化环境中，网络拓扑的动态变化（如 Pod 漂移、节点扩缩容）使连接的建立面临新的挑战，仅靠 `request.timeout.ms` 控制数据请求的超时已经不够。前者用来设定客户端等待连接建立（包括 TCP 连接的建立与认证）的最长时间，默认值为 10 秒；后者用来设定连续多次连接失败时连接超时指数退避的最大上限，默认值为 30 秒，防止在网络瞬断时因频繁重试而压垮集群。在云原生场景下，合理配置这类连接建立阶段的参数，比单纯调整发送超时时间更能有效提升生产者的整体鲁棒性。

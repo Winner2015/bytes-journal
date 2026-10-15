@@ -40,14 +40,14 @@ commit;
 
 我们根据上面的图来看看主要流程：
 
-- 我们的应用程序（client）发起一个开始请求到 TC（transaction）；
-- TC 先将**prepare 消息**写到本地日志，之后向所有的 Si 发起 prepare 消息。以支付宝转账到余额宝为例，TC 给 A 的 prepare 消息是通知支付宝数据库相应账目扣款 1 万，TC 给 B 的 prepare 消息是通知余额宝数据库相应账目增加 1 万。为什么在执行任务前需要先写本地日志呢？主要是为了故障后恢复用，本地日志起到现实生活中凭证的效果，如果没有本地日志（凭证），出问题容易死无对证；
+- 我们的应用程序（client）发起一个开始请求到 TC（Transaction Coordinator，事务协调器）；
+- TC 先将**prepare 消息**写到本地日志，之后向所有的 Si（即第 i 个事务参与者/数据库节点）发起 prepare 消息。以支付宝转账到余额宝为例，TC 给 A 的 prepare 消息是通知支付宝数据库相应账目扣款 1 万，TC 给 B 的 prepare 消息是通知余额宝数据库相应账目增加 1 万。为什么在执行任务前需要先写本地日志呢？主要是为了故障后恢复用，本地日志起到现实生活中凭证的效果，如果没有本地日志（凭证），出问题容易死无对证；
 - Si 收到 prepare 消息后，执行具体本机事务，但不会进行 commit，如果成功返回 yes，不成功返回 no。同理，返回前都应把要返回的消息写到日志里，当作凭证。
 - TC 收集所有执行器返回的消息，如果所有执行器都返回 yes，那么给所有执行器发送 commit 消息，执行器收到 commit 后执行本地事务的 commit 操作；如果有任一个执行器返回 no，那么给所有执行器发送 abort 消息，执行器收到 abort 消息后执行事务 abort 操作。
 
 TC 或 Si 把发送或接收到的消息先写到日志里，主要是为了故障后恢复用。如某一 Si 从故障中恢复后，先检查本机的日志，如果已收到 commit，则提交，如果 abort 则回滚。如果是 yes，则再向 TC 询问一下，确定下一步。如果什么都没有，则很可能在 prepare 阶段 Si 就崩溃了，因此需要回滚。
 
-现如今实现基于两阶段提交的分布式事务也没那么困难了，如果使用 java，那么可以使用开源软件 atomikos 来快速实现。
+在早期的 Java 生态中，常使用 Atomikos 等基于 XA 协议的框架来实现两阶段提交。但在现代微服务架构中，由于 XA 协议严重的性能瓶颈，业界更倾向于使用 Seata 等分布式事务框架，或者直接采用基于消息队列的最终一致性方案。
 
 不过但凡使用过上述两阶段提交的同学都可以发现性能实在是太差，根本不适合高并发的系统。为什么？
 
@@ -58,7 +58,7 @@ TC 或 Si 把发送或接收到的消息先写到日志里，主要是为了故�
 
 ## 1.2 使用消息队列来避免分布式事务
 
-如果仔细观察生活的话，生活的很多场景已经给了我们提示。
+其实生活中很多场景已经给了我们提示。
 
 比如在北京很有名的姚记炒肝点了炒肝并付了钱后，他们并不会直接把你点的炒肝给你，而是给你一张小票，然后让你拿着小票到出货区排队去取。为什么他们要将付钱和取货两个动作分开呢？原因很多，其中一个很重要的原因是为了使他们的接待能力增强（并发量更高）。
 
@@ -89,13 +89,13 @@ commit;
 - 支付宝在扣款事务提交之前，向实时消息服务请求发送消息，实时消息服务只记录消息数据，而不真正发送，只有消息记录成功后才会提交事务；
 - 当支付宝扣款事务被提交成功后，向实时消息服务确认发送。只有在得到确认发送指令后，实时消息服务才真正发送该消息；
 - 当支付宝扣款事务提交失败回滚后，向实时消息服务取消发送。在得到取消发送指令后，该消息将不会被发送；
-- 对于那些未确认的消息或者取消的消息，需要有一个消息状态确认系统定时去支付宝系统查询这个消息的状态并进行更新。为什么需要这一步骤呢？举个例子：假设在第 2 步支付宝扣款事务被成功提交后，系统挂了，此时消息状态并未被更新为“确认发送”，从而导致消息不能被发送。
+- 对于那些未确认的消息或者取消的消息，需要有一个消息状态确认系统定时去支付宝系统查询这个消息的状态并进行更新（这一步正是后文 RocketMQ 事务消息"回查机制"的业务原型）。为什么需要这一步骤呢？举个例子：假设在第 2 步支付宝扣款事务被成功提交后，系统挂了，此时消息状态并未被更新为“确认发送”，从而导致消息不能被发送。
 
 优点是消息数据独立存储，降低业务系统与消息系统间的耦合；缺点是一次消息发送需要两次请求，业务处理服务需要实现消息状态回查接口。
 
 还有一个很严重的问题就是消息重复投递，以我们支付宝转账到余额宝为例，如果相同的消息被重复投递两次，那么我们余额宝账户将会增加2万而不是1万了。
 
-为什么相同的消息会被重复投递？比如余额宝处理完消息 msg 后，发送了处理成功的消息给支付宝，正常情况下支付宝应该要删除消息 msg，但如果支付宝这时候悲剧地挂了，重启后一看消息 msg 还在，就会继续发送消息 msg。
+为什么相同的消息会被重复投递？比如余额宝处理完消息 msg 后，发送了处理成功的消息给支付宝，正常情况下支付宝应该要删除消息 msg，但如果支付宝这时候发生故障宕机，重启后一看消息 msg 还在，就会继续发送消息 msg。
 
 解决方法很简单，在余额宝这边增加消息应用状态表，通俗来说就是个账本，用于记录消息的消费情况，每次来一个消息，在真正执行之前，先去消息应用状态表中查询一遍，如果找到，说明是重复消息，丢弃即可，如果没找到才执行，同时插入到消息应用状态表（同一事务）。
 
@@ -153,9 +153,9 @@ commit;
 
 存在的问题跟上面类似：如果扣款成功，发送消息失败，就会出现 Bob 扣钱了，但是 Smith 账户未加钱。
 
-可能大家会有很多的方法来解决这个问题，比如：直接将发消息放到Bob扣款的事务中去，如果发送失败，抛出异常，事务回滚。这样的处理方式也符合“恰好”不需要解决的原则。
+可能有同学会想到把发消息直接放到 Bob 扣款的数据库事务中去，发送失败就抛出异常、回滚事务。但这种做法并不可取：在数据库事务中执行网络 IO 是典型的反模式，一旦消息服务响应缓慢，数据库连接会被长时间占用甚至耗尽，因此不能作为推荐方案。
 
-RocketMQ 支持事务消息，下面来看看 RocketMQ 是怎样来实现的？
+RocketMQ 的事务消息正是为解决这个两难问题而设计的，先来看看它的整体思路：
 
 ![](imgs/7.png)
 
@@ -164,6 +164,8 @@ RocketMQ 第一阶段发送 Prepared 消息时，会拿到消息的地址，第�
 细心的你可能又发现问题了，如果确认消息发送失败了怎么办？RocketMQ 会定期扫描消息集群中的事务消息，如果发现了 Prepared 消息，它会向消息发送端（生产者）确认，Bob 的钱到底是减了还是没减呢？如果减了是回滚还是继续发送确认消息呢？
 
 RocketMQ 会根据发送端设置的策略来决定是回滚还是继续发送确认消息。这样就保证了消息发送与本地事务同时成功或同时失败。
+
+随着微服务治理体系的成熟，除了依赖单一消息中间件的事务消息外，业界广泛采用的 Seata 框架也提供了 AT、TCC、Saga 等多种分布式事务模式。其中，Seata 的 TCC 模式与 RocketMQ 事务消息的两阶段思想有异曲同工之妙，但 Seata 更侧重于跨服务的 RPC 调用编排。在实际的大型电商架构中，往往是将 RocketMQ 的事务消息用于核心链路的异步解耦与最终一致性保障，而将 Seata 用于对一致性要求极高且链路较短的同步调用场景，两者相辅相成。
 
 # 2 实现细节
 
@@ -177,13 +179,15 @@ RocketMQ 采用了 2PC 的思想来实现提交事务消息，同时增加一个
   - (1) 发送消息（half 消息）。
   - (2) 服务端响应消息写入结果。
   - (3) 根据发送结果执行本地事务（如果写入失败，此时 half 消息对业务不可见，本地逻辑不执行）。
-  - (4) 根据本地事务状态执行 Commit 或者 Rollback（Commit 操作生成消息索引，消息对消费者可见）。
+  - (4) 根据本地事务状态执行 Commit 或者 Rollback（Commit 操作生成 ConsumeQueue 消息索引，消息对消费者可见）。
 - 补偿流程
   - (1) 对没有 Commit/Rollback 的事务消息（pending 状态的消息），从服务端发起一次“回查”。
   - (2) Producer 收到回查消息，检查回查消息对应的本地事务的状态。
   - (3) 根据本地事务状态，重新 Commit 或者 Rollback。
 
-其中，补偿阶段用于解决消息Commit或者Rollback发生超时或者失败的情况。
+其中，补偿阶段用于解决消息 Commit 或者 Rollback 发生超时或者失败的情况。
+
+需要注意的是，在较新的 RocketMQ 版本中，事务回查逻辑已统一整合至 `TransactionListener` 接口的 `checkLocalTransaction` 方法中，废弃了早期的独立监听器设计。而在 RocketMQ 5.0 的云原生架构下，回查请求由无状态的 Proxy 层进行路由和转发，进一步解耦了 Broker 与客户端的直接依赖。
 
 在 RocketMQ 事务消息的主要流程中，一阶段的消息是如何做到对用户不可见的呢？RocketMQ 事务消息的做法是：如果消息是 half 消息，将备份原消息的主题与消息消费队列，然后改变主题为 RMQ_SYS_TRANS_HALF_TOPIC。由于消费组未订阅该主题，故消费端无法消费 half 类型的消息，然后 RocketMQ 会开启一个定时任务，从 Topic 为 RMQ_SYS_TRANS_HALF_TOPIC 中拉取消息进行消费，根据生产者组获取一个服务提供者发送回查事务状态请求，根据事务状态来决定是提交或回滚消息。
 
@@ -193,9 +197,13 @@ RocketMQ 采用了 2PC 的思想来实现提交事务消息，同时增加一个
 
 如果在 RocketMQ 事务消息的二阶段过程中失败了，例如在做 Commit 操作时，出现网络问题导致 Commit 失败，那么需要通过一定的策略使这条消息最终被 Commit。RocketMQ 采用了一种补偿机制，称为“回查”。Broker 端对未确定状态的消息发起回查，将消息发送到对应的 Producer 端（同一个 Group 的 Producer），由 Producer 根据消息来检查本地事务的状态，进而执行 Commit 或者 Rollback。Broker 端通过对比 Half 消息和 Op 消息进行事务消息的回查并且推进 CheckPoint（记录那些事务消息的状态是确定的）。
 
-值得注意的是，RocketMQ 并不会无休止地进行事务状态回查，默认回查 15 次，如果 15 次回查还是无法得知事务状态，RocketMQ 默认回滚该消息。
+值得注意的是，RocketMQ 并不会无休止地进行事务状态回查，最大回查次数由 `transactionCheckMax` 控制，默认为 15 次，如果超过 15 次回查还是无法得知事务状态，RocketMQ 默认丢弃该消息（相当于回滚）。
+
+在 RocketMQ 5.0 的存算分离架构演进中，事务消息的底层存储和高可用机制得到了显著增强。传统架构下，Half 消息存储在单台 Broker 上，若该 Broker 发生磁盘损坏可能导致事务状态永久丢失。而在 5.0 结合 Controller 模式的部署下，Half 消息和 Op 消息会通过多副本机制（基于 Raft 协议）实时同步到多个节点。这意味着即使承载事务消息的主节点宕机，新选举出的主节点依然能无缝接管未完成的事务回查流程，彻底消除了事务消息流转过程中的单点故障风险。
 
 # 3 代码示例
+
+在 RocketMQ 5.0 引入的 gRPC 客户端中，事务消息的发送体验变得更加现代化。开发者不再需要手动配置复杂的线程池来处理回查请求，而是通过实现轻量级的 `TransactionChecker` 接口，配合 gRPC 的异步流式通信机制，由底层的 Proxy 自动管理回查连接的生命周期。这种方式不仅大幅减少了客户端的资源占用，还使得 Go、Python、C++ 等多语言客户端能够以完全一致的语义轻松实现分布式事务。
 
 使用 `TransactionMQProducer` 类创建生产者，并指定唯一的 `ProducerGroup`，就可以设置自定义线程池来处理这些检查请求。
 
@@ -204,7 +212,7 @@ public class TransactionProducer {
    public static void main(String[] args) throws MQClientException, InterruptedException {
        TransactionListener transactionListener = new TransactionListenerImpl();
        TransactionMQProducer producer = new TransactionMQProducer("please_rename_unique_group_name");
-       ExecutorService executorService = new ThreadPoolExecutor(2, 5, 100, TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(2000), new ThreadFactory() {
+       ExecutorService executorService = new ThreadPoolExecutor(2, 5, 100, TimeUnit.SECONDS, new ArrayBlockingQueue<>(2000), new ThreadFactory() {
            @Override
            public Thread newThread(Runnable r) {
                Thread thread = new Thread(r);
@@ -220,17 +228,16 @@ public class TransactionProducer {
            try {
                Message msg =
                    new Message("TopicTest1234", tags[i % tags.length], "KEY" + i,
-                       ("Hello RocketMQ " + i).getBytes(RemotingHelper.DEFAULT_CHARSET));
+                       ("Hello RocketMQ " + i).getBytes(StandardCharsets.UTF_8));
                SendResult sendResult = producer.sendMessageInTransaction(msg, null);
                System.out.printf("%s%n", sendResult);
                Thread.sleep(10);
-           } catch (MQClientException | UnsupportedEncodingException e) {
+           } catch (MQClientException e) {
                e.printStackTrace();
            }
        }
-       for (int i = 0; i < 100000; i++) {
-           Thread.sleep(1000);
-       }
+       // 等待足够长的时间以便 Broker 能够发起事务回查，实际生产中应保持 Producer 进程存活
+       Thread.sleep(60000);
        producer.shutdown();
    }
 }
@@ -269,6 +276,6 @@ public class TransactionListenerImpl implements TransactionListener {
 
 事务消息共有三种状态：提交状态、回滚状态、中间状态。
 
-- `TransactionStatus.CommitTransaction`：提交事务，它允许消费者消费此消息。
-- `TransactionStatus.RollbackTransaction`：回滚事务，它代表该消息将被删除，不允许被消费。
-- `TransactionStatus.Unknown`：中间状态，它代表需要检查消息队列来确定状态。
+- `LocalTransactionState.COMMIT_MESSAGE`：提交事务，允许消费者消费此消息。
+- `LocalTransactionState.ROLLBACK_MESSAGE`：回滚事务，代表该消息将被标记为删除，不允许被消费。
+- `LocalTransactionState.UNKNOW`：中间状态，代表暂时无法确定结果，需要 Broker 稍后继续发起回查来确定状态。
