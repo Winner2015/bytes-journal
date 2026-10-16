@@ -1,45 +1,47 @@
-# 1、RPC
+# Netty RPC
 
-在微服务大行其道的今天，分布式系统越来越重要，实现服务化首先就要考虑服务之间如何通信，也就是**RPC**。
+# 1 RPC
 
-> RPC，全称为Remote Procedure Call，即远程过程调用，它是一个计算机通信协议。它允许像调用本地服务一样调用远程服务。
+在微服务大行其道的今天，分布式系统越来越重要，实现服务化首先就要考虑服务之间如何通信，也就是 **RPC**。
 
-一次RPC调动过程可以简化为下图：
+> RPC，全称为 Remote Procedure Call，即远程过程调用，它是一种计算机通信协议，允许像调用本地服务一样调用远程服务。
 
-![](1.png)
+一次 RPC 调用过程可以简化为下图：
 
-- client 会调用本地动态代理 proxy
-- 这个代理会将调用通过协议转序列化字节流
-- 通过网络框架（比如Netty），将字节流发送到服务端
-- 服务端在受到这个字节流后，会根据协议，反序列化为原始的调用，利用反射原理调用服务方提供的方法
-- 如果请求有返回值，又需要把结果根据协议序列化后，再通过 网络框架 返回给调用方
+![](imgs/1.png)
 
-RPC框架有很多，比较知名的如阿里的Dubbo、google的gRPC、Go语言的rpcx、Apache的thrift。当然了，还有Spring Cloud，不过对于Spring Cloud来说，RPC只是它的一个功能模块。
+- Client 会调用本地动态代理 Proxy
+- 这个代理会按照协议将调用序列化为字节流
+- 通过网络框架（比如 Netty）将字节流发送到服务端
+- 服务端在收到这个字节流后，会根据协议将其反序列化为原始的调用，利用反射原理调用服务方提供的方法
+- 如果请求有返回值，还需要把结果根据协议序列化后，再通过网络框架返回给调用方
 
-RPC框架让调用方像调用本地函数一样调用远程服务，那么如何做到这一点呢？
+RPC 框架有很多，比较知名的如阿里开源的 Dubbo（现为 Apache Dubbo）、Google 的 gRPC、Go 语言的 rpcx、Apache 的 Thrift。当然了，还有 Spring Cloud，不过对于 Spring Cloud 来说，RPC 只是它的一个功能模块。
 
-在使用的时候，调用方是直接调用本地函数，传入相应参数，其他细节它不用管，至于通讯细节交给RPC框架来实现。实际上RPC框架采用代理类的方式，具体来说是动态代理的方式，在运行时动态创建新的类，也就是代理类，在该类中实现通讯的细节问题，比如参数序列化。
+RPC 框架让调用方像调用本地函数一样调用远程服务，那么如何做到这一点呢？
 
-当然不光是序列化，我们还需要约定一个双方通信的协议格式，规定好协议格式，比如请求参数的数据类型，请求的参数，请求的方法名等，这样根据格式进行序列化后进行网络传输，然后服务端收到请求对象后按照指定格式进行解码，这样服务端才知道具体该调用哪个方法，传入什么样的参数。
+在使用的时候，调用方直接调用本地函数，传入相应参数，其他细节它不用管，通信细节交给 RPC 框架来实现。实际上 RPC 框架采用代理类的方式，具体来说是动态代理的方式，在运行时动态创建新的类，也就是代理类，在该类中实现通信的细节问题，比如参数序列化。
 
-刚才又提到网络传输，RPC框架重要的一环也就是网络传输，服务是部署在不同主机上的，如何高效的进行网络传输，尽量不丢包，保证数据完整无误的快速传递出去？实际上，就是利用我们今天的主角——Netty。
+当然不光是序列化，我们还需要约定一个双方通信的协议格式，规定好请求参数的数据类型、请求的参数、请求的方法名等，这样根据格式进行序列化后进行网络传输，然后服务端收到请求对象后按照指定格式进行解码，这样服务端才知道具体该调用哪个方法、传入什么样的参数。
 
-再次总结下一个RPC框架需要重点关注哪几个点：
+刚才又提到网络传输，RPC 框架重要的一环就是网络传输。服务是部署在不同主机上的，如何高效地进行网络传输，尽量不丢包，保证数据完整无误地快速传递出去？答案就是利用我们今天的主角——Netty。
 
-- 代理 （动态代理）
-- 通讯协议
+再总结一下，一个 RPC 框架需要重点关注以下几点：
+
+- 代理（动态代理）
+- 通信协议
 - 序列化
 - 网络传输
 
-下面以Netty为基础来实现一个简易的RPC框架。
+下面以 Netty 为基础来实现一个简易的 RPC 框架。
 
-# 2、Protocol
+# 2 Protocol
 
 其实作为 RPC 的协议，只需要考虑一个问题，就是怎么把一次本地方法的调用，变成能够被网络传输的字节流。
 
 ## 2.1 请求体与响应体
 
-首先要定义方法的调用和返回，两个对象实体：
+首先要定义方法的调用和返回这两个对象实体：
 
 ```java
 //请求体
@@ -62,7 +64,7 @@ public class RpcResponse {
 
 ## 2.2 序列化与反序列化
 
-确定了需要序列化的对象实体，就要确定序列化的协议，实现两个方法，序列化和反序列化：
+确定了需要序列化的对象实体，就要确定序列化的协议，并实现序列化和反序列化两个方法：
 
 ```java
 public interface Serialization {
@@ -73,11 +75,11 @@ public interface Serialization {
 
 可选用的序列化的协议很多，比如：
 
-- jdk 的序列化方法。（不推荐，不利于之后的跨语言调用）
-- json 可读性强，但是序列化速度慢，体积大。
-- protobuf，kyro，Hessian 等都是优秀的序列化框架，也可按需选择。
+- JDK 自带的序列化方法（不推荐，不利于之后的跨语言调用）
+- JSON，可读性强，但是序列化速度慢、体积大
+- Protobuf、Kryo、Hessian 等都是优秀的序列化框架，也可按需选择
 
-为了简单和便于调试，我们就选择 json 作为序列化协议，使用FastJSON作为解析框架：
+为了简单和便于调试，我们选择 JSON 作为序列化协议，使用 Fastjson 作为解析框架（注：Fastjson 1.x 曾多次曝出反序列化安全漏洞，实际项目中可考虑改用其升级版 Fastjson2 或 Jackson）：
 
 ```java
 public class FastJsonSerialization implements Serialization {
@@ -93,57 +95,55 @@ public class FastJsonSerialization implements Serialization {
 }
 ```
 
+## 2.3 编码与解码
 
+TCP 没有消息保护边界，需要在消息接收端处理消息边界问题，也就是我们所说的**粘包**、**拆包**问题，可以通过自定义通信协议的方式来解决。
 
-## 2.3 编解与解码
+通信协议就是通信双方约定好的数据格式，发送方按照这个数据格式来发送，接收方按照这个格式来解析。典型的协议包括：定长协议、特殊字符分隔符协议、报文头指定 Length 等。在确定了使用什么通信协议的情况下，发送方和接收方要完成的工作不同：
 
-TCP无消息保护边界, 需要在消息接收端处理消息边界问题，也就是我们所说的**粘包**、**拆包**问题，可以通过自定义通信协议的方式来解决。
+- **编码**：发送方要将待发送的数据转换成协议规定格式的二进制数据流，称之为**编码**（encode），编码功能由编码器（encoder）完成。
+- **解码**：接收方需要根据协议的格式，对二进制数据进行解析，称之为**解码**（decode），解码功能由解码器（decoder）完成。
+- **编解码**：如果有一种组件，既能编码，又能解码，则称之为**编码解码器**（codec）。这种组件在发送方和接收方都可以使用。
 
-通信协议就是通信双方约定好的数据格式，发送方按照这个数据格式来发送，接受方按照这个格式来解析。典型的协议包括：定长协议、特殊字符分隔符协议、报文头指定Length等。在确定了使用什么通信协议的情况下，发送方和接收方要完成的工作不同：
+Netty 提供了一套完善的编解码框架，不论是公有协议还是私有协议，我们都可以在这个框架的基础上，非常容易地实现相应的编码器/解码器。输入的数据是在 `ChannelInboundHandler` 中处理的，输出的数据是在 `ChannelOutboundHandler` 中处理的。因此编码器/解码器实际上是这两个接口的特殊实现类，只不过它们的作用仅仅是编码/解码。
 
-- **编码：**发送方要将发送的二进制数据转换成协议规定的格式的二进制数据流，称之为**编码**(encode)，编码功能由编码器(encoder)完成。
-- **解码：**接收方需要根据协议的格式，对二进制数据进行解析，称之为**解码**(decode)，解码功能由解码器(decoder)完成。
-- **编解码：**如果有一种组件，既能编码，又能解码，则称之为**编码解码器**(codec)。这种组件在发送方和接收方都可以使用。
+### 2.3.1 解码器
 
-Netty提供了一套完善的编解码框架，不论是公有协议/私有协议，我们都可以在这个框架的基础上，非常容易的实现相应的编码/解码器。输入的数据是在`ChannelInboundHandler`中处理的，数据输出是在`ChannelOutboundHandler`中处理的。因此编码器/解码器实际上是这两个接口的特殊实现类，不过它们的作用仅仅是编码/解码。
+对于解码器，Netty 中主要提供了抽象基类 `ByteToMessageDecoder` 和 `MessageToMessageDecoder`。
 
-### 2.3.1 编码器
+![](imgs/2.png)
 
-对于解码器，Netty中主要提供了抽象基类`ByteToMessageDecoder`和`MessageToMessageDecoder`。
+通常，ByteToMessageDecoder 解码后会得到一个 ByteBuf 实例列表，每个 ByteBuf 实例都包含了一个完整的报文信息。可以把这些 ByteBuf 实例直接交给之后的 ChannelInboundHandler 处理，或者将这些包含了完整报文信息的 ByteBuf 实例解析封装到不同的 Java 对象实例后，再交给其处理。不管哪一种情况，之后的 ChannelInboundHandler 在处理时都不需要再考虑粘包、拆包问题。
 
-![](2.png)
+Netty 提供了一些 ByteToMessageDecoder 的常见实现类：
 
-通常，ByteToMessageDecoder解码后内容会得到一个ByteBuf实例列表，每个ByteBuf实例都包含了一个完整的报文信息。可以直接把这些ByteBuf实例直接交给之后的ChannelInboundHandler处理，或者将这些包含了完整报文信息的ByteBuf实例解析封装到不同的Java对象实例后，再交其处理。不管哪一种情况，之后的ChannelInboundHandler在处理时不需要在考虑粘包、拆包问题。
+- **FixedLengthFrameDecoder**：定长协议解码器，我们可以指定固定的字节数算一个完整的报文
+- **LineBasedFrameDecoder**：行分隔符解码器，遇到 `\n` 或者 `\r\n`，则认为是一个完整的报文
+- **DelimiterBasedFrameDecoder**：分隔符解码器，与 LineBasedFrameDecoder 类似，只不过分隔符可以自己指定
+- **LengthFieldBasedFrameDecoder**：基于长度字段的解码器，将报文划分为报文头/报文体，根据报文头中的 Length 字段确定报文体的长度，因此报文体的长度是可变的
+- **JsonObjectDecoder**：JSON 格式解码器，当检测到匹配数量的 `{`、`}` 或 `[`、`]` 时，则认为是一个完整的 JSON 对象或者 JSON 数组
 
-不过，ByteToMessageDecoder提供的一些常见的实现类：
+这些实现类都只是将接收到的二进制数据解码成包含完整报文信息的 ByteBuf 实例后，就直接交给了之后的 ChannelInboundHandler 处理。之所以不将 ByteBuf 中的信息封装到 Java 对象中，道理很简单：Netty 根本不知道开发者想封装到什么对象中，甚至不知道报文中的具体内容是什么，因此不如直接把包含了完整报文信息的 ByteBuf 实例交给开发人员自己来解析封装。
 
-- **FixedLengthFrameDecoder：**定长协议解码器，我们可以指定固定的字节数算一个完整的报文
-- **LineBasedFrameDecoder：**行分隔符解码器，遇到\n或者\r\n，则认为是一个完整的报文
-- **DelimiterBasedFrameDecoder：**分隔符解码器，与LineBasedFrameDecoder类似，只不过分隔符可以自己指定
-- **LengthFieldBasedFrameDecoder：**长度编码解码器，将报文划分为报文头/报文体，根据报文头中的Length字段确定报文体的长度，因此报文提的长度是可变的
-- **JsonObjectDecoder：**json格式解码器，当检测到匹配数量的"{" 、”}”或”[””]”时，则认为是一个完整的json对象或者json数组。
+而 `MessageToMessageDecoder` 则是将一个本身就包含完整报文信息的对象转换成另一个 Java 对象。一个比较容易理解的类比是 Java Web 编程：通常客户端浏览器发送过来的二进制数据，已经被 Web 容器（如 Tomcat）解析成了一个 HttpServletRequest 对象，但是我们还是需要将 HttpServletRequest 中的数据提取出来，封装成我们自己的 POJO 类，也就是从一个 Java 对象（HttpServletRequest）转换成另一个 Java 对象（我们的 POJO 类）。
 
-这些实现类，都只是将接收到的二进制数据，解码成包含完整报文信息的ByteBuf实例后，就直接交给了之后的ChannelInboundHandler处理。之所以不将ByteBuf中的信息封装到Java对象中，道理很简单，Netty根本不知道开发者想封装到什么对象中，甚至不知道报文中的具体内容是什么，因此不如直接把包含了完整报文信息的ByteBuf实例，交给开发人员来自己解析封装。
+### 2.3.2 编码器
 
-而`MessageToMessageDecoder`则是将一个本身就包含完整报文信息的对象转换成另一个Java对象。一个比较容易的理解的类比案例是Java Web编程，通常客户端浏览器发送过来的二进制数据，已经被web容器(如tomcat)解析成了一个HttpServletRequest对象，但是我们还是需要将HttpServletRequest中的数据提取出来，封装成我们自己的POJO类，也就是从一个Java对象(HttpServletRequest)转换成另一个Java对象(我们的POJO类)。
+与 ByteToMessageDecoder 和 MessageToMessageDecoder 相对应，Netty 提供了对应的编码器实现 `MessageToByteEncoder` 和 `MessageToMessageEncoder`，二者都实现了 `ChannelOutboundHandler` 接口。
 
-### 2.3.2 解码器
+![](imgs/3.png)
 
-与ByteToMessageDecoder和MessageToMessageDecoder相对应，Netty提供了对应的编码器实现`MessageToByteEncoder`和`MessageToMessageEncoder`，二者都实现`ChannelOutboundHandler`接口。
-
-![](3.png)
-
-相对来说，编码器比解码器的实现要更加简单，原因在于解码器除了要按照协议解析数据，还要要处理粘包、拆包问题；而编码器只要将数据转换成协议规定的二进制格式发送即可。
+相对来说，编码器比解码器的实现要更加简单，原因在于解码器除了要按照协议解析数据，还要处理粘包、拆包问题；而编码器只要将数据转换成协议规定的二进制格式发送即可。
 
 ### 2.3.3 编码解码器
 
-编码解码器同时具有编码与解码功能，特点同时实现了ChannelInboundHandler和ChannelOutboundHandler接口，因此在数据输入和输出时都能进行处理。Netty提供提供了一个ChannelDuplexHandler适配器类，编码解码器的抽象基类 `ByteToMessageCodec` 、`MessageToMessageCodec`都继承与此类，如下：
+编码解码器同时具有编码与解码功能，其特点是同时实现了 ChannelInboundHandler 和 ChannelOutboundHandler 接口，因此在数据输入和输出时都能进行处理。Netty 提供了一个 ChannelDuplexHandler 适配器类，编码解码器的抽象基类 `ByteToMessageCodec`、`MessageToMessageCodec` 都继承自此类，如下：
 
-![](4.png)
+![](imgs/4.png)
 
-# 3、Server
+# 3 Server
 
-Netty作为高性能的NIO通信框架，在很多RPC框架中都有它的身影。我们也采用它当做通信服务器。
+Netty 作为高性能的 NIO 通信框架，在很多 RPC 框架中都有它的身影。我们也用它作为通信服务器。
 
 ```java
 public class RpcServer implements ApplicationContextAware, InitializingBean {
@@ -215,9 +215,9 @@ public class RpcServer implements ApplicationContextAware, InitializingBean {
 }
 ```
 
-为了自动化一点，这里用了一点“奇巧淫技”，`RpcServer`继承了`ApplicationContextAware`接口，在Spring容器启动时，会扫描出被自定义注解`@RpcService`标记的bean，放到`RpcProviderRegistry`，其实就相当于一个beanName——》bean实例的Map，便于RpcServerHandler获取Rpc服务。
+为了自动化一点，这里用了一点“奇技淫巧”：`RpcServer` 实现了 `ApplicationContextAware` 接口，在 Spring 容器启动时，会扫描出被自定义注解 `@RpcService` 标记的 bean，放到 `RpcProviderRegistry` 中。它其实就相当于一个“接口名 → bean 实例”的 Map，便于 RpcServerHandler 获取 RPC 服务。
 
-`RpcServerChannelInitializer`用于初始化`ChannelPipeline`，注册服务端的编码器、解码器，以及服务处理的handler：
+`RpcServerChannelInitializer` 用于初始化 `ChannelPipeline`，注册服务端的编码器、解码器，以及服务处理的 Handler：
 
 ```java
 public class RpcServerChannelInitializer extends ChannelInitializer<SocketChannel> {
@@ -244,9 +244,9 @@ public class RpcServerChannelInitializer extends ChannelInitializer<SocketChanne
     }
 ```
 
-我们选择`LengthFieldBasedFrameDecoder`来处理粘包、拆包问题，也就是说，客户端写入的请求报文要遵循“报文长度 + 报文体”的数据格式。
+我们选择 `LengthFieldBasedFrameDecoder` 来处理粘包、拆包问题，也就是说，客户端写入的请求报文要遵循“报文长度 + 报文体”的数据格式。
 
-`RpcServerHandler`继承自`ChannelInboundHandlerAdapter`，有数据流入时会触发`channelRead`方法，数据处理事通过Java的反射实现的：
+`RpcServerHandler` 继承自 `ChannelInboundHandlerAdapter`，有数据流入时会触发 `channelRead` 方法，数据处理是通过 Java 的反射实现的：
 
 ```java
 @Override
@@ -297,9 +297,9 @@ private Object handle (RpcRequest request) throws Exception {
 }
 ```
 
-# 4、Client
+# 4 Client
 
-与Server端类似，Client也需要借助Netty来实现网络通信，只不过比Server端要简单些：
+与 Server 端类似，Client 也需要借助 Netty 来实现网络通信，只不过比 Server 端要简单些：
 
 ```java
 public class RpcClient {
@@ -352,20 +352,22 @@ public class RpcClient {
 }
 ```
 
-Netty 是一个异步框架，所有的返回都是基于 Future 和 Callback 机制。但是在上面的`sendRequest`方法中，将RPC的调用由异步转为了同步。也就是说，发起RPC调用后，调用方会阻塞在这里，直到服务端的处理结果返回。具体来说，有两个关键点：
+Netty 是一个异步框架，所有的返回都是基于 Future 和 Callback 机制。但是在上面的 `sendRequest` 方法中，将 RPC 的调用由异步转为了同步。也就是说，发起 RPC 调用后，调用方会阻塞在这里，直到服务端的处理结果返回。具体来说，有两个关键点：
 
-- 第一是往channe写入后，调用了`sync()`方法，在数据写入完成之前，线程会阻塞住；
-- 第二是依靠`RpcResponsePool`里面的同步队列`SynchronousQueue`，`SynchronousQueue`是一个容量为0的阻塞队列，对于每一个take的线程会阻塞直到有一个put的线程放入元素为止。
+- 第一是往 Channel 写入后，调用了 `sync()` 方法，在数据写入完成之前，线程会阻塞住
+- 第二是依靠 `RpcResponsePool` 里面每个请求对应的阻塞队列 `ArrayBlockingQueue`（容量为 1），执行 take 的线程会阻塞，直到响应被放入队列为止
+
+这里不能使用 `SynchronousQueue`：它的容量为 0，`offer()` 只有在恰好有线程阻塞在 `take()` 上时才会成功。如果服务端响应先于调用方执行 `takeResponse` 到达，`offer()` 会直接返回 false，响应被丢弃，调用方将永远阻塞。容量为 1 的队列可以先把响应暂存起来，无论响应和 take 谁先到都不会丢失。
 
 ```java
 public class RpcResponsePool {
 
     //requestID ——》 调用结果
-    private ConcurrentHashMap<String, SynchronousQueue<RpcResponse>> queueMap = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String, BlockingQueue<RpcResponse>> queueMap = new ConcurrentHashMap<>();
 
     public void putRequest (String requestId) {
-        //建立request的同步队列
-        SynchronousQueue<RpcResponse> queue = new SynchronousQueue<>();
+        //建立request的阻塞队列，容量为1，响应先到也能暂存
+        BlockingQueue<RpcResponse> queue = new ArrayBlockingQueue<>(1);
         queueMap.put(requestId, queue);
     }
 
@@ -389,9 +391,7 @@ public class RpcResponsePool {
 }
 ```
 
-到这里可以解释下，为什么要在 `RpcRequest` 和 `RpcResponse` 中增加一个 ID了：因为 netty 中的 channel 是会被多个线程使用的。当一个结果异步的返回后，并不知道是哪个线程返回的。这个时候就需要利用一个 Map，建立 ID 和 `RpcResponse` 的映射。这样请求的线程只要使用对应的 ID 就能获取，相应的返回结果。
-
-
+到这里可以解释一下，为什么要在 `RpcRequest` 和 `RpcResponse` 中增加一个 ID 了：因为 Netty 中的 Channel 是会被多个线程使用的，当一个结果异步地返回后，并不知道它对应的是哪个线程发出的请求。这个时候就需要利用一个 Map，建立 ID 和 `RpcResponse` 的映射，这样请求的线程只要使用对应的 ID，就能获取相应的返回结果。
 
 客户端同样也需要注册编解码器与收发数据的处理器等：
 
@@ -413,14 +413,14 @@ public class RpcClientChannelInitializer extends ChannelInitializer<SocketChanne
         pipeline.addLast(new CommonRpcEncoder(new FastJsonSerialization(), RpcRequest.class));
         pipeline.addLast(new CommonRpcDecoder(new FastJsonSerialization(), RpcResponse.class));
 
-        pipeline.addLast(new RpcClientHandler(rpcResponsePool)); //即使InboundHandler，又是OutboundHandler，必须放在最后
+        pipeline.addLast(new RpcClientHandler(rpcResponsePool)); //既是InboundHandler，又是OutboundHandler，必须放在最后
 
     }
 
 }
 ```
 
-与Server端的不同，`RpcClientHandler`是`ChannelDuplexHandler`的子类，在数据写入时（收到RpcResponse），触发`write`方法；数据读取时（发送RpcRequest），触发`channelRead`方法。
+与 Server 端不同，`RpcClientHandler` 是 `ChannelDuplexHandler` 的子类，在数据写出时（发送 RpcRequest）触发 `write` 方法，在数据读入时（收到 RpcResponse）触发 `channelRead` 方法。
 
 ```java
 public class RpcClientHandler extends ChannelDuplexHandler {
@@ -451,7 +451,7 @@ public class RpcClientHandler extends ChannelDuplexHandler {
             logger.info("send request: " + JSON.toJSONString(msg));
             RpcRequest req = (RpcRequest) msg;
 
-            //发送请求之前，先将请求ID，放入放到RpcResponsePool
+            //发送请求之前，先将请求ID放入RpcResponsePool
             rpcResponsePool.putRequest(req.getId());
         }
         super.write(ctx, msg, promise);
@@ -459,7 +459,7 @@ public class RpcClientHandler extends ChannelDuplexHandler {
 }
 ```
 
-至此，客户端与服务端的通信已经打通，但是还有一点非常重要的事情没有做，如何让客户端对RPC的调用无感知，也就是像调用本地方法那样调用远程服务？答案是利用动态代理，将Netty的通信细节屏蔽掉。
+至此，客户端与服务端的通信已经打通，但是还有一件非常重要的事情没有做：如何让客户端对 RPC 的调用无感知，也就是像调用本地方法那样调用远程服务？答案是利用动态代理，将 Netty 的通信细节屏蔽掉。
 
 ```java
 public class RpcConsumerRegistry implements BeanFactoryPostProcessor {
@@ -498,7 +498,7 @@ public class RpcConsumerRegistry implements BeanFactoryPostProcessor {
 }
 ```
 
-`RpcConsumerConfig`用于配置远程服务的信息，每个服务都会生成一个代理类，并注册到Spring容器当中。这里使用的是JDK的动态代理，所以还需要一个`InvocationHandler`来处理真正的业务逻辑：
+`RpcConsumerConfig` 用于配置远程服务的信息，每个服务都会生成一个代理类，并注册到 Spring 容器当中。这里使用的是 JDK 的动态代理，所以还需要一个 `InvocationHandler` 来处理真正的业务逻辑：
 
 ```java
 public class RpcInvoker implements InvocationHandler {
@@ -521,7 +521,7 @@ public class RpcInvoker implements InvocationHandler {
         r.setParameterTypes(method.getParameterTypes());
         r.setParameters(args);
 
-        //通过Netty的发送请求，并接受调用结果
+        //通过Netty发送请求，并接收调用结果
         RpcResponse response = rpcClient.sendRequest(r);
         if (response.getCode() == -1) {
             throw new RuntimeException("invoke rpc service failed: " + response.getMsg());
@@ -533,13 +533,13 @@ public class RpcInvoker implements InvocationHandler {
 }
 ```
 
- `invoke` 方法主要做了三件事：
+`invoke` 方法主要做了三件事：
 
 - 生成 RequestId
 - 拼装 RpcRequest
-- 调用 Transports 发送请求，获取结果
+- 调用 RpcClient 发送请求，获取结果
 
-# 5、Test
+# 5 Test
 
 假设服务端定义了一个查询当前时间的接口：
 
@@ -568,7 +568,7 @@ public class TimeServiceImpl implements TimeService {
 }
 ```
 
-服务端配置好IP与端口号，启动即可：
+服务端配置好 IP 与端口号，启动即可：
 
 ```java
 @Configuration
@@ -597,9 +597,7 @@ public class ServerApp {
 
 服务端启动后，会监听指定端口，等待请求。
 
-
-
-客户端依赖服务端的API包，在自己的类当中引入`TimeService`：
+客户端依赖服务端的 API 包，在自己的类当中引入 `TimeService`：
 
 ```java
 @Component
@@ -615,7 +613,7 @@ public class TimeEchoService {
 }
 ```
 
-客户端的jar包中并没有`TimeService`的实现类，但是通过动态代理我们模拟了一个实现类，并将其注册到Spring容器当中，如此一来``TimeService`就可以被当做本都服务一样，使用`@Autowired`等注解来操纵、管理。当发生真正的调用时，代理类会与远程服务交互，完成字节传输、序列化、反序列化、对象转换等事务，达到上层无感知的效果。
+客户端的 jar 包中并没有 `TimeService` 的实现类，但是通过动态代理我们模拟了一个实现类，并将其注册到 Spring 容器当中，如此一来 `TimeService` 就可以被当作本地服务一样，使用 `@Autowired` 等注解来注入和管理。当发生真正的调用时，代理类会与远程服务交互，完成字节传输、序列化、反序列化、对象转换等工作，达到上层无感知的效果。
 
 客户端的配置与启动方式如下：
 
@@ -666,9 +664,6 @@ public class ClientApp {
 }
 ```
 
+完整代码的 GitHub 地址：[sample-netty-rpc](https://github.com/Winner2015/sample-netty-rpc)
 
-
-完整代码的GitHub地址：[sample-netty-rpc](https://github.com/Winner2015/sample-netty-rpc)
-
-当然，以上代码只是包含最基础的远程调用功能，实际上一个完整的RPC框架还需要很多其他功能，比如服务的自动注册与发现（可利用ZooKeeper实现）、负载均衡、心跳检测、服务治理等。
-
+当然，以上代码只包含最基础的远程调用功能，实际上一个完整的 RPC 框架还需要很多其他功能，比如服务的自动注册与发现（可利用 ZooKeeper 实现）、负载均衡、心跳检测、服务治理等。
