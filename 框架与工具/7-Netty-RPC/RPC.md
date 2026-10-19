@@ -16,7 +16,7 @@
 - 服务端在收到这个字节流后，会根据协议将其反序列化为原始的调用，利用反射原理调用服务方提供的方法
 - 如果请求有返回值，还需要把结果根据协议序列化后，再通过网络框架返回给调用方
 
-RPC 框架有很多，比较知名的如阿里开源的 Dubbo（现为 Apache Dubbo）、Google 的 gRPC、Go 语言的 rpcx、Apache 的 Thrift。当然了，还有 Spring Cloud，不过对于 Spring Cloud 来说，RPC 只是它的一个功能模块。
+RPC 框架有很多，比较知名的如阿里开源的 Dubbo（现为 Apache Dubbo）、Google 的 gRPC、Go 语言的 rpcx、Apache 的 Thrift。Spring Cloud 则是一套微服务工具集，服务间调用通常借助 OpenFeign 基于 HTTP 完成，严格来说并不是 RPC 框架。
 
 RPC 框架让调用方像调用本地函数一样调用远程服务，那么如何做到这一点呢？
 
@@ -32,6 +32,8 @@ RPC 框架让调用方像调用本地函数一样调用远程服务，那么如�
 - 通信协议
 - 序列化
 - 网络传输
+
+在通信协议方面，传统 RPC 框架多是在 TCP 之上自定义私有协议，本文的实现也是如此；而 gRPC 直接基于 HTTP/2，Dubbo 3 推出的 Triple 协议也兼容 gRPC。HTTP/2 的二进制分帧和多路复用允许在一个 TCP 连接上交错传输多个请求和响应，解决了 HTTP/1.1 在应用层的队头阻塞（TCP 层的队头阻塞仍然存在）；采用标准协议还便于跨语言调用，也更容易被网关、Service Mesh 等基础设施识别和治理。
 
 下面以 Netty 为基础来实现一个简易的 RPC 框架。
 
@@ -79,21 +81,34 @@ public interface Serialization {
 - JSON，可读性强，但是序列化速度慢、体积大
 - Protobuf、Kryo、Hessian 等都是优秀的序列化框架，也可按需选择
 
-为了简单和便于调试，我们选择 JSON 作为序列化协议，使用 Fastjson 作为解析框架（注：Fastjson 1.x 曾多次曝出反序列化安全漏洞，实际项目中可考虑改用其升级版 Fastjson2 或 Jackson）：
+为了简单和便于调试，我们选择 JSON 作为序列化协议，使用 Jackson 作为解析框架（Fastjson 1.x 曾多次曝出反序列化漏洞，官方仓库已归档并建议升级到 Fastjson2，新项目不建议再使用）：
 
 ```java
-public class FastJsonSerialization implements Serialization {
+public class JacksonSerialization implements Serialization {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     @Override
     public <T> byte[] serialize (T obj) {
-        return JSON.toJSONBytes(obj);
+        try {
+            return MAPPER.writeValueAsBytes(obj);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("serialize failed", e);
+        }
     }
 
     @Override
     public <T> T deSerialize (byte[] data, Class<T> clz) {
-        return JSON.parseObject(data, clz);
+        try {
+            return MAPPER.readValue(data, clz);
+        } catch (IOException e) {
+            throw new IllegalStateException("deserialize failed", e);
+        }
     }
 }
 ```
+
+需要注意，JSON 不携带 Java 类型信息，`RpcRequest.parameters`、`RpcResponse.data` 这类 Object 字段中的自定义对象，反序列化后会变成 Map，服务端还需要结合 `parameterTypes` 再做一次类型转换。本文的示例只传递字符串等简单类型，所以没有处理这一点。
 
 ## 2.3 编码与解码
 
@@ -146,7 +161,7 @@ Netty 提供了一些 ByteToMessageDecoder 的常见实现类：
 Netty 作为高性能的 NIO 通信框架，在很多 RPC 框架中都有它的身影。我们也用它作为通信服务器。
 
 ```java
-public class RpcServer implements ApplicationContextAware, InitializingBean {
+public class RpcServer implements ApplicationContextAware, InitializingBean, DisposableBean {
 
     private static final Logger logger = LoggerFactory.getLogger(RpcServer.class);
 
@@ -187,7 +202,7 @@ public class RpcServer implements ApplicationContextAware, InitializingBean {
     */
     private void start () {
 
-        //Netty 是基于 Reacotr 模型的，所以需要初始化两组线程 boss 和 worker
+        //Netty 是基于 Reactor 模型的，所以需要初始化两组线程 boss 和 worker
         // boss 负责分发请求，worker 负责执行相应的 handler
         bossGroup = new NioEventLoopGroup(1);
         workGroup = new NioEventLoopGroup(4);
@@ -201,21 +216,29 @@ public class RpcServer implements ApplicationContextAware, InitializingBean {
                 .childHandler(new RpcServerChannelInitializer(rpcServiceRegistry));//注册编解码器、服务处理器等
 
         try {
-            ChannelFuture cf = bootstrap.bind(host, port).sync();
+            bootstrap.bind(host, port).sync();
             logger.info("rpc server started");
-            cf.channel().closeFuture().sync();
         } catch (Exception e) {
-            e.printStackTrace();
             bossGroup.shutdownGracefully();
             workGroup.shutdownGracefully();
+            throw new IllegalStateException("rpc server start failed", e);
         }
 
+    }
+
+    @Override
+    public void destroy () {
+        //Spring 容器关闭时释放线程资源
+        bossGroup.shutdownGracefully();
+        workGroup.shutdownGracefully();
     }
 
 }
 ```
 
-为了自动化一点，这里用了一点“奇技淫巧”：`RpcServer` 实现了 `ApplicationContextAware` 接口，在 Spring 容器启动时，会扫描出被自定义注解 `@RpcService` 标记的 bean，放到 `RpcProviderRegistry` 中。它其实就相当于一个“接口名 → bean 实例”的 Map，便于 RpcServerHandler 获取 RPC 服务。
+为了实现服务提供者的自动注册，这里利用了 Spring 容器的扩展点：`RpcServer` 实现了 `ApplicationContextAware` 接口，在 Spring 容器启动时，会扫描出被自定义注解 `@RpcService` 标记的 bean，放到 `RpcProviderRegistry` 中。它其实就相当于一个“接口名 → bean 实例”的 Map，便于 RpcServerHandler 获取 RPC 服务。
+
+另外要注意，`start()` 运行在 Spring 的初始化流程中，只等待端口绑定完成即可，不能像独立的 Netty 程序那样调用 `channel().closeFuture().sync()`，否则会一直阻塞在这里，导致 Spring 容器无法完成启动。Netty 的 EventLoop 线程是非守护线程，绑定成功后进程不会退出。
 
 `RpcServerChannelInitializer` 用于初始化 `ChannelPipeline`，注册服务端的编码器、解码器，以及服务处理的 Handler：
 
@@ -235,10 +258,10 @@ public class RpcServerChannelInitializer extends ChannelInitializer<SocketChanne
 
         //InboundHandler，执行顺序为注册顺序
         pipeline.addLast(new LengthFieldBasedFrameDecoder(65535,0,4));
-        pipeline.addLast(new CommonRpcDecoder(new FastJsonSerialization(), RpcRequest.class));
+        pipeline.addLast(new CommonRpcDecoder(new JacksonSerialization(), RpcRequest.class));
 
         //OutboundHandler，执行顺序为注册顺序的逆序
-        pipeline.addLast(new CommonRpcEncoder(new FastJsonSerialization(), RpcResponse.class));
+        pipeline.addLast(new CommonRpcEncoder(new JacksonSerialization(), RpcResponse.class));
         pipeline.addLast(new RpcServerHandler(rpcServiceRegistry));
 
     }
@@ -252,28 +275,29 @@ public class RpcServerChannelInitializer extends ChannelInitializer<SocketChanne
 @Override
 public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
 
-  logger.info("channelRead: " + JSON.toJSONString(msg));
-
-  if (msg instanceof  RpcRequest) {
-    //收到了RPC请求
-    RpcRequest request = (RpcRequest)msg;
-    RpcResponse response = new RpcResponse();
-    response.setRequestId(request.getId());
-
-    try {
-      Object data = handle(request); //处理数据
-      response.setData(data);
-    } catch (Exception e) {
-      e.printStackTrace();
-      response.setMsg(e.getMessage());
-      response.setCode(-1);
-    }
-
-    //调用结果写入
-    ctx.writeAndFlush(response);
+  if (!(msg instanceof RpcRequest)) {
+    //不是RPC请求，交给后续Handler处理
+    ctx.fireChannelRead(msg);
+    return;
   }
 
-  ctx.fireChannelRead(msg);
+  //收到了RPC请求
+  RpcRequest request = (RpcRequest)msg;
+  logger.info("receive rpc request: {}", request.getId());
+  RpcResponse response = new RpcResponse();
+  response.setRequestId(request.getId());
+
+  try {
+    Object data = handle(request); //处理数据
+    response.setData(data);
+  } catch (Exception e) {
+    logger.error("handle rpc request failed: {}", request.getId(), e);
+    response.setMsg(e.getMessage());
+    response.setCode(-1);
+  }
+
+  //调用结果写入，RpcRequest到此处理完毕，不再向后传播
+  ctx.writeAndFlush(response);
 }
 
 private Object handle (RpcRequest request) throws Exception {
@@ -312,12 +336,10 @@ public class RpcClient {
         this.remoteAddress = remoteAddress;
     }
 
-    private AtomicBoolean connected = new AtomicBoolean(false);
-
-    private Channel channel; //连接服务器成功后，会获取一个Channel
+    private volatile Channel channel; //连接服务器成功后，会获取一个Channel
     private RpcResponsePool rpcResponsePool; //存储RPC的调用结果
 
-    public void connect () {
+    private void connect () {
 
         EventLoopGroup loopGroup = new NioEventLoopGroup();
         rpcResponsePool = new RpcResponsePool();
@@ -334,14 +356,18 @@ public class RpcClient {
             channel = bootstrap.connect(remoteAddress).sync().channel();
             logger.info("connect rpc server success");
         } catch (Exception e) {
-            e.printStackTrace();
             loopGroup.shutdownGracefully();
+            throw new IllegalStateException("connect rpc server failed: " + remoteAddress, e);
         }
     }
 
     public RpcResponse sendRequest (RpcRequest request) throws InterruptedException {
-        if (connected.compareAndSet(false, true)) { //防止重复连接
-            connect ();
+        if (channel == null) {
+            synchronized (this) {
+                if (channel == null) { //双重检查，保证并发调用时只建立一次连接，且连接建立完成后才往下走
+                    connect();
+                }
+            }
         }
 
         channel.writeAndFlush(request).sync(); //发送完成之前，会阻塞住
@@ -410,8 +436,8 @@ public class RpcClientChannelInitializer extends ChannelInitializer<SocketChanne
         ChannelPipeline pipeline = ch.pipeline();
 
         pipeline.addLast(new LengthFieldBasedFrameDecoder(65535,0,4));
-        pipeline.addLast(new CommonRpcEncoder(new FastJsonSerialization(), RpcRequest.class));
-        pipeline.addLast(new CommonRpcDecoder(new FastJsonSerialization(), RpcResponse.class));
+        pipeline.addLast(new CommonRpcEncoder(new JacksonSerialization(), RpcRequest.class));
+        pipeline.addLast(new CommonRpcDecoder(new JacksonSerialization(), RpcResponse.class));
 
         pipeline.addLast(new RpcClientHandler(rpcResponsePool)); //既是InboundHandler，又是OutboundHandler，必须放在最后
 
@@ -436,8 +462,8 @@ public class RpcClientHandler extends ChannelDuplexHandler {
     @Override
     public void channelRead (ChannelHandlerContext ctx, Object msg) throws Exception {
         if (msg instanceof RpcResponse) {
-            logger.info("receive server response: " + JSON.toJSONString(msg));
             RpcResponse resp = (RpcResponse) msg;
+            logger.info("receive server response: {}", resp.getRequestId());
 
             //接收到RPC结果，放到RpcResponsePool中，匹配发送时放入的请求ID
             rpcResponsePool.putResponse(resp);
@@ -448,8 +474,8 @@ public class RpcClientHandler extends ChannelDuplexHandler {
     @Override
     public void write (ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
         if (msg instanceof RpcRequest) {
-            logger.info("send request: " + JSON.toJSONString(msg));
             RpcRequest req = (RpcRequest) msg;
+            logger.info("send request: {}", req.getId());
 
             //发送请求之前，先将请求ID放入RpcResponsePool
             rpcResponsePool.putRequest(req.getId());
@@ -498,7 +524,9 @@ public class RpcConsumerRegistry implements BeanFactoryPostProcessor {
 }
 ```
 
-`RpcConsumerConfig` 用于配置远程服务的信息，每个服务都会生成一个代理类，并注册到 Spring 容器当中。这里使用的是 JDK 的动态代理，所以还需要一个 `InvocationHandler` 来处理真正的业务逻辑：
+`RpcConsumerConfig` 用于配置远程服务的信息，每个服务都会生成一个代理类，并注册到 Spring 容器当中。这里使用的是 JDK 的动态代理，它要求被代理的类型必须是接口，这对 RPC 来说正好合适，因为调用方手里只有服务的 API 接口。成熟的框架在代理方式上会有不同的取舍：Dubbo 默认使用 Javassist 在运行期生成代理类，以减少反射调用的开销；gRPC 则不使用动态代理，而是在编译期根据 proto 文件生成客户端 Stub。
+
+使用 JDK 动态代理时，还需要一个 `InvocationHandler` 来处理真正的业务逻辑：
 
 ```java
 public class RpcInvoker implements InvocationHandler {
@@ -666,4 +694,4 @@ public class ClientApp {
 
 完整代码的 GitHub 地址：[sample-netty-rpc](https://github.com/Winner2015/sample-netty-rpc)
 
-当然，以上代码只包含最基础的远程调用功能，实际上一个完整的 RPC 框架还需要很多其他功能，比如服务的自动注册与发现（可利用 ZooKeeper 实现）、负载均衡、心跳检测、服务治理等。
+当然，以上代码只包含最基础的远程调用功能，实际上一个完整的 RPC 框架还需要很多其他功能，比如服务的自动注册与发现（可借助 ZooKeeper、Nacos、Consul 等注册中心，部署在 Kubernetes 上时也可以直接使用 Service 机制）、负载均衡、心跳检测、超时与重试、服务治理等。
