@@ -115,9 +115,9 @@ String str = stream.collect(Collectors.joining());
 
 接下来，当把一个数据结构包装成 Stream 后，就要开始对里面的元素进行各类操作了。常见的操作可以归类如下：
 
-- **Intermediate**：map（mapToInt、flatMap 等）、filter、distinct、sorted、peek、limit、skip、parallel、sequential、unordered，以及 Java 9 新增的 takeWhile、dropWhile，Java 16 新增的 mapMulti，Java 24 新增的 gather
-- **Terminal**：forEach、forEachOrdered、toArray、reduce、collect、min、max、count、anyMatch、allMatch、noneMatch、findFirst、findAny、iterator，以及 Java 16 新增的 toList
-- **Short-circuiting**：anyMatch、allMatch、noneMatch、findFirst、findAny、limit、takeWhile
+- **Intermediate**：`map`（`mapToInt`、`flatMap` 等）、`filter`、`distinct`、`sorted`、`peek`、`limit`、`skip`、`parallel`、`sequential`、`unordered`，以及 Java 9 新增的 `takeWhile`、`dropWhile`，Java 16 新增的 `mapMulti`，Java 24 新增的 `gather`
+- **Terminal**：`forEach`、`forEachOrdered`、`toArray`、`reduce`、`collect`、`min`、`max`、`count`、`anyMatch`、`allMatch`、`noneMatch`、`findFirst`、`findAny`、`iterator`，以及 Java 16 新增的 `toList`
+- **Short-circuiting**：`anyMatch`、`allMatch`、`noneMatch`、`findFirst`、`findAny`、`limit`、`takeWhile`
 
 我们下面看一下 Stream 的比较典型用法。
 
@@ -273,7 +273,7 @@ concat = Stream.of("a", "B", "c", "D", "e", "F").filter(x -> x.compareTo("Z") > 
 
 ## 3.6 limit/skip
 
-`limit` 返回 Stream 的前面 n 个元素；`skip` 则是扔掉前 n 个元素（在 Java 8 正式发布前，它叫 `substream`，后来改名为 `skip`）。
+`limit` 返回 Stream 的前面 n 个元素；`skip` 则是扔掉前 n 个元素（在 Java 8 正式发布前，有一个名为 `substream` 的方法，后来被拆分为 `skip` 和 `limit`）。
 
 `limit` 和 `skip` 对运行次数的影响：
 

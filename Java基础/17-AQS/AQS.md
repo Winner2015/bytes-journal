@@ -146,7 +146,7 @@ protected final boolean compareAndSetState(int expect, int update) {
 
 `compareAndSetState()` 方法以乐观锁的方式更新共享资源。
 
-独占锁是一种悲观锁，`synchronized` 就是一种独占锁，它会导致其他所有需要锁的线程挂起，等待持有锁的线程释放锁。而另一种更加高效的锁就是乐观锁。所谓乐观锁就是，每次不加锁，而是假设没有冲突而去完成某项操作，如果因为冲突失败就重试，直到成功为止。乐观锁用到的机制就是 **CAS**，即 Compare And Swap。
+`synchronized` 是一种典型的悲观锁，它会导致其他所有需要锁的线程挂起，等待持有锁的线程释放锁。而另一种更加高效的锁就是乐观锁。所谓乐观锁就是，每次不加锁，而是假设没有冲突而去完成某项操作，如果因为冲突失败就重试，直到成功为止。乐观锁用到的机制就是 **CAS**，即 Compare And Swap。
 
 CAS 指的是现代 CPU 广泛支持的一种对内存中的共享数据进行操作的特殊指令。这个指令会对内存中的共享数据做原子的读写操作。简单介绍一下这个指令的操作过程：
 
@@ -608,8 +608,8 @@ public class Mutex {
 | JDK 5 | 随 JSR 166 引入 `AbstractQueuedSynchronizer` |
 | JDK 6 | 新增 `AbstractQueuedLongSynchronizer`（`state` 为 `long` 类型）和 `AbstractOwnableSynchronizer`（提供 `exclusiveOwnerThread`） |
 | JDK 7 | 新增 `hasQueuedPredecessors()`，公平锁借助它判断是否有线程排在自己前面 |
-| JDK 9 | 内部的原子操作从 `sun.misc.Unsafe` 改为 `VarHandle` |
-| JDK 14 | AQS 被重写，队列节点与获取流程大幅简化，内部改用 `jdk.internal.misc.Unsafe` |
+| JDK 9 | 内部的原子操作从 `sun.misc.Unsafe` 改为 `jdk.internal.misc.Unsafe`（模块化封装） |
+| JDK 14 | AQS 被重写，队列节点与获取流程大幅简化 |
 | JDK 21 | 虚拟线程正式发布，AQS 基于 `LockSupport.park()` 阻塞，虚拟线程阻塞时会从载体线程上卸载，不会固定载体线程 |
 
 ## 5.2 JDK 14 的重写

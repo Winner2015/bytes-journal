@@ -24,8 +24,8 @@
 
 保证线程安全一般有两种方式：
 
-* **悲观锁**：`synchronized`、`ReentrantLock` 等
-* **乐观锁**：CAS
+- **悲观锁**：`synchronized`、`ReentrantLock` 等
+- **乐观锁**：CAS
 
 ### 1.1.1 悲观锁
 
@@ -140,9 +140,9 @@ CPU 从主内存加载数据时以缓存行为单位，会**把相邻的数据�
 
 `ArrayBlockingQueue` 有三个成员变量：
 
-* `takeIndex`：下一个被取走的元素下标
-* `putIndex`：下一个可插入元素的位置下标
-* `count`：队列中元素的数量
+- `takeIndex`：下一个被取走的元素下标
+- `putIndex`：下一个可插入元素的位置下标
+- `count`：队列中元素的数量
 
 这三个变量很容易被放到同一个缓存行中，而它们由不同的线程修改：生产者修改 `putIndex` 和 `count`，消费者修改 `takeIndex` 和 `count`，每次修改都会让对方缓存中的这个缓存行失效。
 
@@ -156,10 +156,10 @@ CPU 从主内存加载数据时以缓存行为单位，会**把相邻的数据�
 
 有没有一种比 `ArrayBlockingQueue` 更好的队列，能同时满足以下条件呢？
 
-* 线程安全
-* 有界
-* 无锁
-* 高性能
+- 线程安全
+- 有界
+- 无锁
+- 高性能
 
 答案就是 **Disruptor**。
 
@@ -183,7 +183,7 @@ Disruptor 到底有多快，可以通过测试数据有个直观印象：
 
 `Loggers all async` 采用的是 Disruptor，而 `Async Appender` 采用的是 `ArrayBlockingQueue`。
 
-由图可见，单线程情况下，`Loggers all async` 与 `Async Appender` 的吞吐量相差不大；但在 64 个线程时，`Loggers all async` 的吞吐量约为 `Async Appender` 的 12 倍，是同步模式的 68 倍。（该测试基于 JDK 1.7 和 Solaris 10，数据较早，但相对差距依然有参考意义。）
+由图可见，单线程情况下，`Loggers all async` 与 `Async Appender` 的吞吐量相差不大；但在 64 个线程时，`Loggers all async` 的吞吐量约为 `Async Appender` 的 12 倍，是同步模式的 68 倍。（该测试基于 JDK 7 和 Solaris 10，数据较早，但相对差距依然有参考意义。）
 
 Disruptor 出色的性能使其得到了很多开源项目的青睐，如 Log4j 2（异步日志器）、HBase（WAL 写入）、Apache Camel（camel-disruptor 组件）以及早期的 Apache Storm 等。Storm 自 2.0 起已改用 JCTools 的队列替换了 Disruptor。
 
@@ -191,9 +191,9 @@ Disruptor 出色的性能使其得到了很多开源项目的青睐，如 Log4j 
 
 Disruptor 之所以性能出色，主要依靠三项关键设计：
 
-* **环形数组 RingBuffer**
-* **CAS 无锁设计**
-* **消除伪共享**
+- **环形数组 RingBuffer**
+- **CAS 无锁设计**
+- **消除伪共享**
 
 ## 3.1 环形数组
 
@@ -211,9 +211,9 @@ RingBuffer 没有传统队列的头指针和尾指针，而是用一个只增不
 
 RingBuffer 的数据结构有以下优势：
 
-* 数组元素在内存中连续存储，对 CPU 缓存友好：一个元素被加载到缓存行时，相邻的几个元素也会被一起加载，CPU 无需频繁去主存读取下一个元素。
-* 数组在初始化时就**预先分配好所有元素对象**（通过 `EventFactory` 创建），之后只修改对象的字段而不创建新对象，避免了频繁的对象分配和垃圾回收。
-* 数组长度为 2 的 n 次方，**元素定位可以通过位运算完成**，效率更高。
+- 数组元素在内存中连续存储，对 CPU 缓存友好：一个元素被加载到缓存行时，相邻的几个元素也会被一起加载，CPU 无需频繁去主存读取下一个元素。
+- 数组在初始化时就**预先分配好所有元素对象**（通过 `EventFactory` 创建），之后只修改对象的字段而不创建新对象，避免了频繁的对象分配和垃圾回收。
+- 数组长度为 2 的 n 次方，**元素定位可以通过位运算完成**，效率更高。
 
 ## 3.2 无锁设计
 
@@ -221,8 +221,8 @@ RingBuffer 的数据结构有以下优势：
 
 Disruptor 的生产者分为单生产者和多生产者两种模式，分别对应 `SingleProducerSequencer` 和 `MultiProducerSequencer`，消费者则不做区分。
 
-* 单生产者模式下，只有一个线程写入，不存在写冲突，**完全不需要 CAS**，只需普通读写加上必要的内存屏障来更新序号。消费者获取最大可消费的位置后进行消费。
-* 多生产者模式下，多出了一个与 RingBuffer 等长的数组，称为 **availableBuffer**。每个生产者先通过 CAS 竞争获取可写的空间，然后再往里写入数据；消费者在消费前，需要从 availableBuffer 中找出已经写入完成的最长连续序号。
+- 单生产者模式下，只有一个线程写入，不存在写冲突，**完全不需要 CAS**，只需普通读写加上必要的内存屏障来更新序号。消费者获取最大可消费的位置后进行消费。
+- 多生产者模式下，多出了一个与 RingBuffer 等长的数组，称为 **availableBuffer**。每个生产者先通过 CAS 竞争获取可写的空间，然后再往里写入数据；消费者在消费前，需要从 availableBuffer 中找出已经写入完成的最长连续序号。
 
 ### 3.2.1 单生产者
 
@@ -345,9 +345,9 @@ Java 的 `long` 类型占 8 字节，主流缓存行大小为 64 字节，可以
 
 ![](imgs/14.png)
 
-* V：Value，有效数据
-* P：Padding，填充
-* U：其他无关数据
+- V：Value，有效数据
+- P：Padding，填充
+- U：其他无关数据
 
 Disruptor 4.x 改用 `byte` 字段填充，前后各 56 个，同样是 56 字节；`value` 也不再声明为 `volatile`，而是通过 `VarHandle` 按需选择 `getVolatile`、`getAcquire`、`setRelease` 等不同强度的内存语义来访问：
 
@@ -456,10 +456,10 @@ public class DisruptorDemo {
 
 几点说明：
 
-* `bufferSize` 必须是 2 的 n 次方。
-* `ProducerType.SINGLE` 对应 `SingleProducerSequencer`，只有确定只有一个线程发布事件时才能使用，否则要用 `ProducerType.MULTI`（默认值）。
-* `publishEvent` 内部完成了“申请序号、填充事件、发布序号”三步，推荐使用这种 Translator 风格的 API，避免手动调用 `next()`/`publish()` 时遗漏 `publish` 导致消费者卡住。
-* 消费者之间可以编排依赖关系，比如 `disruptor.handleEventsWith(a, b).then(c)` 表示 a、b 并行消费同一批事件，二者都处理完后再交给 c。
+- `bufferSize` 必须是 2 的 n 次方。
+- `ProducerType.SINGLE` 对应 `SingleProducerSequencer`，只有确定只有一个线程发布事件时才能使用，否则要用 `ProducerType.MULTI`（默认值）。
+- `publishEvent` 内部完成了”申请序号、填充事件、发布序号”三步，推荐使用这种 Translator 风格的 API，避免手动调用 `next()`/`publish()` 时遗漏 `publish` 导致消费者卡住。
+- 消费者之间可以编排依赖关系，比如 `disruptor.handleEventsWith(a, b).then(c)` 表示 a、b 并行消费同一批事件，二者都处理完后再交给 c。
 
 ## 4.1 等待策略
 
@@ -485,14 +485,14 @@ public class DisruptorDemo {
 
 从 3.x 升级到 4.x 时，最常见的改动有两处：
 
-* 原来通过 `Executor` 构造 Disruptor 的代码要改为传入 `ThreadFactory`。
-* 原来用 `WorkerPool` 实现的“多个消费者竞争消费”模式被移除，可以改为由单个 `EventHandler` 消费后再分发到线程池，或者使用多个 `EventHandler` 按序号取模各自处理一部分事件。
+- 原来通过 `Executor` 构造 Disruptor 的代码要改为传入 `ThreadFactory`。
+- 原来用 `WorkerPool` 实现的”多个消费者竞争消费”模式被移除，可以改为由单个 `EventHandler` 消费后再分发到线程池，或者使用多个 `EventHandler` 按序号取模各自处理一部分事件。
 
 结合近几年 Java 生态的变化，还有几点值得关注：
 
-* **Log4j 2 仍在使用 Disruptor**：Log4j 2 的异步日志器至今仍基于 Disruptor 实现，较新版本已兼容 Disruptor 4.x。
-* **JCTools 是常见的替代方案**：JCTools 提供了 `SpscArrayQueue`、`MpscArrayQueue` 等针对不同生产者、消费者数量专门优化的有界无锁队列，同样使用了缓存行填充。Netty 内部就使用了 JCTools 的队列，Apache Storm 2.0 也用它替换了 Disruptor。如果只需要一个高性能的队列，而不需要 Disruptor 的事件预分配和消费者编排能力，JCTools 更轻量。
-* **不适合搭配虚拟线程**：Disruptor 的消费者是少量长期运行、最好绑定 CPU 核的线程，自旋类等待策略更会一直占用 CPU，用虚拟线程运行它们没有任何好处，反而会占住载体线程。Disruptor 应继续通过 `ThreadFactory` 使用平台线程；虚拟线程适合的是大量阻塞在 I/O 上的任务。
+- **Log4j 2 仍在使用 Disruptor**：Log4j 2 的异步日志器至今仍基于 Disruptor 实现，较新版本已兼容 Disruptor 4.x。
+- **JCTools 是常见的替代方案**：JCTools 提供了 `SpscArrayQueue`、`MpscArrayQueue` 等针对不同生产者、消费者数量专门优化的有界无锁队列，同样使用了缓存行填充。Netty 内部就使用了 JCTools 的队列，Apache Storm 2.0 也用它替换了 Disruptor。如果只需要一个高性能的队列，而不需要 Disruptor 的事件预分配和消费者编排能力，JCTools 更轻量。
+- **不适合搭配虚拟线程**：Disruptor 的消费者是少量长期运行、最好绑定 CPU 核的线程，自旋类等待策略更会一直占用 CPU，用虚拟线程运行它们没有任何好处，反而会占住载体线程。Disruptor 应继续通过 `ThreadFactory` 使用平台线程；虚拟线程适合的是大量阻塞在 I/O 上的任务。
 
 # 6 总结
 

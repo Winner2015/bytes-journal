@@ -234,7 +234,7 @@ String url = "jdbc:mysql:///...";
 String user = "root";
 String password = "root";
 
-Class.forName("com.mysql.cj.jdbc.Driver");
+Class.forName("com.mysql.jdbc.Driver");
 Connection connection = DriverManager.getConnection(url, user, password);
 ```
 

@@ -164,7 +164,7 @@ channel.read(bufferArray);
 
 注意 `Buffer` 首先被插入到数组，然后再将数组作为 `channel.read()` 的输入参数。`read()` 方法按照 `Buffer` 在数组中的顺序将从 `Channel` 中读取的数据写入到 `Buffer`，当一个 `Buffer` 被写满后，`Channel` 紧接着向另一个 `Buffer` 中写。
 
-Scattering Reads 在移动到下一个 `Buffer` 前，必须填满当前的 `Buffer`，这也意味着它不适用于动态消息（消息大小不固定）。换句话说，如果存在消息头和消息体，消息头必须完成填充（例如 128 byte），Scattering Reads 才能正常工作。
+Scattering Reads 在移动到下一个 `Buffer` 前，必须填满当前的 `Buffer`，这也意味着它不适用于动态消息（消息大小不固定）。换句话说，如果存在消息头和消息体，消息头必须完成填充（例如 128 字节），Scattering Reads 才能正常工作。
 
 **聚集（Gather）**：在写操作时将多个 `Buffer` 的数据写入同一个 `Channel`，因此，`Channel` 将多个 `Buffer` 中的数据“聚集（Gather）”后发送到 `Channel`。如下图描述：
 
@@ -181,7 +181,7 @@ ByteBuffer[] bufferArray = { header, body };
 channel.write(bufferArray);
 ```
 
-`Buffer` 数组是 `write()` 方法的入参，`write()` 方法会按照 `Buffer` 在数组中的顺序，将数据写入到 `Channel`，注意只有 `position` 和 `limit` 之间的数据才会被写入。因此，如果一个 `Buffer` 的容量为 128 byte，但是仅仅包含 58 byte 的数据，那么这 58 byte 的数据将被写入到 `Channel` 中。因此与 Scattering Reads 相反，Gathering Writes 能较好地处理动态消息。
+`Buffer` 数组是 `write()` 方法的入参，`write()` 方法会按照 `Buffer` 在数组中的顺序，将数据写入到 `Channel`，注意只有 `position` 和 `limit` 之间的数据才会被写入。因此，如果一个 `Buffer` 的容量为 128 字节，但是仅仅包含 58 字节的数据，那么这 58 字节的数据将被写入到 `Channel` 中。因此与 Scattering Reads 相反，Gathering Writes 能较好地处理动态消息。
 
 ## 2.3 FileChannel
 
@@ -436,7 +436,7 @@ buf.flip();
 int bytesSent = channel.send(buf, new InetSocketAddress("127.0.0.1", 80));
 ```
 
-这个例子发送一串字符到“127.0.0.1”服务器的 UDP 端口 80。因为服务端并没有监控这个端口，所以什么也不会发生。也不会通知你发出的数据包是否已收到，因为 UDP 在数据传送方面没有任何保证。
+这个例子发送一串字符到“127.0.0.1”服务器的 UDP 端口 80。因为服务端并没有监听这个端口，所以什么也不会发生。也不会通知你发出的数据包是否已收到，因为 UDP 在数据传送方面没有任何保证。
 
 可以将 `DatagramChannel`“连接”到网络中的特定地址。由于 UDP 是无连接的，连接到特定地址并不会像 TCP 通道那样创建一个真正的连接，而是锁住 `DatagramChannel`，让其只能从特定地址收发数据。比如：
 
